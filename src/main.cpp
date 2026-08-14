@@ -88,11 +88,9 @@ void printTwoLines(const String &line1, const String &line2, String &lastText)
   {
     u8g2.setFont(u8g2_font_6x13_t_cyrillic);
 
-    // Первая строка (Базовая линия Y = 15)
     u8g2.setCursor(0, 15);
     u8g2.print(line1);
 
-    // Вторая строка (Смещаем Y вниз на 12 пикселей: 15 + 12 = 27)
     u8g2.setCursor(0, 27);
     u8g2.print(line2);
 
@@ -136,13 +134,11 @@ void loop()
     interruptFlag = false;
     uint16_t status = radio.getIrqStatus();
 
-    // ИЗМЕНЕНО: Обрабатываем сначала TX_DONE, потом RX_DONE
     if (status & RADIOLIB_SX126X_IRQ_TX_DONE)
     {
       Serial.println("Ответ успешно улетел Мастеру!");
       printText("Ответ отправлен", lastText);
 
-      // КРИТИЧЕСКИ ВАЖНО: После передачи возвращаем чип в режим прослушивания
       radio.startReceive();
       Serial.println("Слейв переведен в режим приема");
     }
@@ -177,7 +173,7 @@ void loop()
           {
             Serial.print("Ошибка отправки ответа: ");
             Serial.println(state_tx);
-            // Если ошибка отправки, сразу возвращаемся в прием
+            
             radio.startReceive();
           }
         }
@@ -185,7 +181,7 @@ void loop()
         {
           Serial.println("Получен пакет не от мастера или не запрос");
           printText("Пакет не наш", lastText);
-          // ИЗМЕНЕНО: Убеждаемся, что остаемся в режиме приема
+          
           radio.startReceive();
         }
       }
@@ -194,7 +190,7 @@ void loop()
         Serial.print("Ошибка получения пакета: ");
         Serial.println(state);
         printText("Ошибка получения пакета!", lastText);
-        // ИЗМЕНЕНО: При ошибке тоже возвращаемся в прием
+        
         radio.startReceive();
       }
     }
@@ -227,14 +223,13 @@ unsigned long requestTime;
 
 void loop()
 {
-  // СОСТОЯНИЕ 1: Ожидание нажатия кнопки
   if (code_state == WAIT_FOR_CLICK)
   {
     printTwoLines("Нажмите кнопку для", "запроса телеметрии", lastText);
 
     if (digitalRead(BUTTON_PIN) == LOW)
     {
-      delay(50); // Антидребезг контактов кнопки PRG
+      delay(50); 
       if (digitalRead(BUTTON_PIN) == LOW)
       {
 
@@ -247,14 +242,13 @@ void loop()
         txPacket.type_package = REQUEST_ID;
         txPacket.temperature = 0;
 
-        // ИЗМЕНЕНО: вместо radio.transmit используем radio.startTransmit
         uint16_t state = radio.startTransmit((uint8_t *)&txPacket, sizeof(Package));
 
         if (state == RADIOLIB_ERR_NONE)
         {
           Serial.println("Пакет начал отправку. Жду завершения TX.");
-          requestTime = millis();        // Фиксируем время отправки для таймаута
-          code_state = WAIT_FOR_TX_DONE; // Переходим в состояние ожидания завершения отправки
+          requestTime = millis();        
+          code_state = WAIT_FOR_TX_DONE; 
         }
         else
         {
@@ -264,7 +258,7 @@ void loop()
           delay(2000);
         }
 
-        // Ждем, пока пользователь отпустит кнопку PRG
+        
         while (digitalRead(BUTTON_PIN) == LOW);
       }
     }
@@ -280,13 +274,12 @@ void loop()
       {
         Serial.println("Пакет успешно отправлен! Включаю приемник.");
         printTwoLines("Пакет отправлен", "Жду ответа", lastText);
-        radio.startReceive();           // Переводим SX1262 в режим прослушивания
-        requestTime = millis();         // Обновляем время для таймаута ответа
-        code_state = WAIT_FOR_RESPONSE; // Переключаем автомат
+        radio.startReceive();           
+        requestTime = millis();         
+        code_state = WAIT_FOR_RESPONSE; 
       }
     }
 
-    // Таймаут если передача зависла
     if (millis() - requestTime >= 5000)
     {
       Serial.println("Таймаут передачи!");
@@ -297,11 +290,9 @@ void loop()
     }
   }
 
-  // СОСТОЯНИЕ 3: Ожидание ответа от Слейва
+ 
   else if (code_state == WAIT_FOR_RESPONSE)
   {
-
-    // Сценарий А: Получен пакет по радиоканалу
     if (interruptFlag)
     {
       interruptFlag = false;
@@ -314,7 +305,7 @@ void loop()
 
         if (state == RADIOLIB_ERR_NONE)
         {
-          // Проверяем адресацию и тип пакета
+        
           if (rxPacket.from_id == SLAVE_ID && rxPacket.type_package == RESPONSE_ID)
           {
             Serial.print("Ответ получен! Температура: ");
@@ -323,12 +314,12 @@ void loop()
             String msg = "Темп: " + String(rxPacket.temperature / 100.0) + " C";
             printTwoLines("Данные приняты!", msg, lastText);
 
-            delay(5000);                 // Показываем результат 5 секунд
-            code_state = WAIT_FOR_CLICK; // Возвращаемся в исходное состояние
+            delay(5000);                 
+            code_state = WAIT_FOR_CLICK;
           }
           else
           {
-            // Пакет не наш (чужой ID) — продолжаем слушать эфир
+      
             Serial.println("Получен чужой пакет. Игнорируем.");
             radio.startReceive();
           }
@@ -342,19 +333,15 @@ void loop()
         }
       }
     }
-
-    // Сценарий Б: Слейв не ответил вовремя (Таймаут по TIMEOUT_TIME)
     if (millis() - requestTime >= TIMEOUT_TIME)
     {
       Serial.println("Таймаут! Слейв не отвечает.");
       printTwoLines("Ошибка связи:", "пакет не пришёл", lastText);
 
-      radio.standby();             // Переводим радио в режим ожидания (выключаем приемник)
-      delay(3000);                 // Показываем ошибку 3 секунды
-      code_state = WAIT_FOR_CLICK; // Возвращаемся к ожиданию кнопки
+      radio.standby();  
+      delay(3000);                 
+      code_state = WAIT_FOR_CLICK; 
     }
   }
-
-  delay(10); // Разгрузка ядра микроконтроллера ESP32
 }
 #endif
