@@ -3,19 +3,17 @@
 #include <U8g2lib.h>
 #include <RadioLib.h>
 #include <ds18b20.h>
+#include <LoraHomeProtocol.h>
 
 #define BUTTON_PIN 0
 
 // !!! CHOOSE MODE BEFORE COMPILING !!!
- #define MASTER_MODE   // - request the telemetry
+// #define MASTER_MODE   // - request the telemetry
 // #define SLAVE_MODE // - response the telemetry
 
 // PROTOCOL_LOGIC
 #define MASTER_ID 0x01
 #define SLAVE_ID 0x02
-
-#define REQUEST_ID 0x01
-#define RESPONSE_ID 0x02
 #define TIMEOUT_TIME 10000
 
 // OLED
@@ -44,13 +42,6 @@ U8G2_SSD1306_128X64_NONAME_1_SW_I2C u8g2(U8G2_R0, /* clock=*/OLED_SCL, /* data=*
 // U8G2_SSD1306_128X64_NONAME_1_SW_I2C u8g2(U8G2_R0, /* clock=*/ 16, /* data=*/ 17, /* reset=*/ U8X8_PIN_NONE);   // ESP32 Thing, pure SW emulated I2C
 SX1262 radio = new Module(LORA_NSS, LORA_DIO1, LORA_NRST, LORA_BUSY);
 
-struct Package
-{
-  uint8_t from_id;
-  uint8_t to_id;
-  uint8_t type_package; // 0x01 - request, 0x02 - response
-  uint16_t temperature;
-};
 
 void setFlag()
 {
@@ -150,7 +141,7 @@ void loop()
 
       if (state == RADIOLIB_ERR_NONE)
       {
-        if (rxPacket.from_id == MASTER_ID && rxPacket.type_package == REQUEST_ID)
+        if (rxPacket.from_id == MASTER_ID && rxPacket.type_package == response)
         {
 
           Serial.println("Получен запрос! Формирую ответ...");
@@ -159,7 +150,7 @@ void loop()
           Package txPacket;
           txPacket.from_id = SLAVE_ID;
           txPacket.to_id = MASTER_ID;
-          txPacket.type_package = RESPONSE_ID;
+          txPacket.type_package = response;
           sensor.requestTemperatures();
           float floatTemp = sensor.getTempCByIndex(0);
           txPacket.temperature = int16_t(floatTemp * 100);
@@ -239,7 +230,7 @@ void loop()
         Package txPacket;
         txPacket.from_id = MASTER_ID;
         txPacket.to_id = SLAVE_ID;
-        txPacket.type_package = REQUEST_ID;
+        txPacket.type_package = request;
         txPacket.temperature = 0;
 
         uint16_t state = radio.startTransmit((uint8_t *)&txPacket, sizeof(Package));
@@ -306,7 +297,7 @@ void loop()
         if (state == RADIOLIB_ERR_NONE)
         {
         
-          if (rxPacket.from_id == SLAVE_ID && rxPacket.type_package == RESPONSE_ID)
+          if (rxPacket.from_id == SLAVE_ID && rxPacket.type_package == response)
           {
             Serial.print("Ответ получен! Температура: ");
             Serial.println(rxPacket.temperature);
