@@ -1,0 +1,360 @@
+#include <Arduino.h>
+#include <SPI.h>
+#include <U8g2lib.h>
+#include <RadioLib.h>
+#include <ds18b20.h>
+
+#define BUTTON_PIN 0
+
+// !!! CHOOSE MODE BEFORE COMPILING !!!
+ #define MASTER_MODE   // - request the telemetry
+// #define SLAVE_MODE // - response the telemetry
+
+// PROTOCOL_LOGIC
+#define MASTER_ID 0x01
+#define SLAVE_ID 0x02
+
+#define REQUEST_ID 0x01
+#define RESPONSE_ID 0x02
+#define TIMEOUT_TIME 10000
+
+// OLED
+#define OLED_SCL 18
+#define OLED_SDA 17
+#define OLED_RST 21
+#define VEXT_PIN 36
+
+// LORA
+#define LORA_NSS 8
+#define LORA_DIO1 14
+#define LORA_NRST 12
+#define LORA_BUSY 13
+
+// GLOBAL VARIABLES
+String lastText = "";
+volatile bool interruptFlag = false;
+unsigned long lastTime = 0;
+bool Button_pressed = false;
+
+OneWire oneWire(4);
+DallasTemperature sensor(&oneWire);
+
+U8G2_SSD1306_128X64_NONAME_1_SW_I2C u8g2(U8G2_R0, /* clock=*/OLED_SCL, /* data=*/OLED_SDA, /* reset=*/OLED_RST);
+// U8G2_SSD1306_128X64_NONAME_1_SW_I2C u8g2(U8G2_R0, /* clock=*/ SCL, /* data=*/ SDA, /* reset=*/ U8X8_PIN_NONE);   // All Boards without Reset of the Display
+// U8G2_SSD1306_128X64_NONAME_1_SW_I2C u8g2(U8G2_R0, /* clock=*/ 16, /* data=*/ 17, /* reset=*/ U8X8_PIN_NONE);   // ESP32 Thing, pure SW emulated I2C
+SX1262 radio = new Module(LORA_NSS, LORA_DIO1, LORA_NRST, LORA_BUSY);
+
+struct Package
+{
+  uint8_t from_id;
+  uint8_t to_id;
+  uint8_t type_package; // 0x01 - request, 0x02 - response
+  uint16_t temperature;
+};
+
+void setFlag()
+{
+  interruptFlag = true;
+}
+void printText(const String &s, String &lastText)
+{
+  if (s == lastText)
+  {
+    return;
+  }
+  lastText = s;
+  u8g2.clearDisplay();
+  u8g2.firstPage();
+  do
+  {
+    u8g2.setFont(u8g2_font_6x13_t_cyrillic);
+    u8g2.setCursor(0, 20);
+    u8g2.print(s);
+  } while (u8g2.nextPage());
+}
+
+void printTwoLines(const String &line1, const String &line2, String &lastText)
+{
+  String currentText = line1 + "|" + line2;
+  if (currentText == lastText)
+  {
+    return;
+  }
+  lastText = currentText;
+
+  u8g2.clearDisplay();
+  u8g2.firstPage();
+  do
+  {
+    u8g2.setFont(u8g2_font_6x13_t_cyrillic);
+
+    // Первая строка (Базовая линия Y = 15)
+    u8g2.setCursor(0, 15);
+    u8g2.print(line1);
+
+    // Вторая строка (Смещаем Y вниз на 12 пикселей: 15 + 12 = 27)
+    u8g2.setCursor(0, 27);
+    u8g2.print(line2);
+
+  } while (u8g2.nextPage());
+}
+
+void setup()
+{
+  lastTime = millis();
+  Serial.begin(115200);
+  while (!Serial);
+  Serial.println("OLED Test");
+  pinMode(VEXT_PIN, OUTPUT);
+  digitalWrite(VEXT_PIN, LOW);
+  u8g2.begin();
+  u8g2.enableUTF8Print();
+  sensor.begin();
+
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+
+  // RADIO
+  int state = radio.begin(868.7, 125.0, 12, 5);
+  if (state != RADIOLIB_ERR_NONE)
+  {
+    printText("ERROR radio.begin", lastText);
+  }
+  radio.setPacketReceivedAction(setFlag);
+  radio.startReceive();
+}
+
+/**************************
+    SLAVE LOOP
+ *************************/
+#ifdef SLAVE_MODE
+void loop()
+{
+  sensor.requestTemperatures();
+  String temperature = String(sensor.getTempCByIndex(0));
+  if (interruptFlag)
+  {
+    interruptFlag = false;
+    uint16_t status = radio.getIrqStatus();
+
+    // ИЗМЕНЕНО: Обрабатываем сначала TX_DONE, потом RX_DONE
+    if (status & RADIOLIB_SX126X_IRQ_TX_DONE)
+    {
+      Serial.println("Ответ успешно улетел Мастеру!");
+      printText("Ответ отправлен", lastText);
+
+      // КРИТИЧЕСКИ ВАЖНО: После передачи возвращаем чип в режим прослушивания
+      radio.startReceive();
+      Serial.println("Слейв переведен в режим приема");
+    }
+    else if (status & RADIOLIB_SX126X_IRQ_RX_DONE)
+    {
+      Package rxPacket;
+
+      int16_t state = radio.readData((uint8_t *)&rxPacket, sizeof(Package));
+
+      if (state == RADIOLIB_ERR_NONE)
+      {
+        if (rxPacket.from_id == MASTER_ID && rxPacket.type_package == REQUEST_ID)
+        {
+
+          Serial.println("Получен запрос! Формирую ответ...");
+          printText("Запрос! Отвечаю", lastText);
+
+          Package txPacket;
+          txPacket.from_id = SLAVE_ID;
+          txPacket.to_id = MASTER_ID;
+          txPacket.type_package = RESPONSE_ID;
+          sensor.requestTemperatures();
+          float floatTemp = sensor.getTempCByIndex(0);
+          txPacket.temperature = int16_t(floatTemp * 100);
+
+          int state_tx = radio.startTransmit((uint8_t *)&txPacket, sizeof(Package));
+          if (state_tx == RADIOLIB_ERR_NONE)
+          {
+            Serial.println("Начинаю отправку ответа...");
+          }
+          else
+          {
+            Serial.print("Ошибка отправки ответа: ");
+            Serial.println(state_tx);
+            // Если ошибка отправки, сразу возвращаемся в прием
+            radio.startReceive();
+          }
+        }
+        else
+        {
+          Serial.println("Получен пакет не от мастера или не запрос");
+          printText("Пакет не наш", lastText);
+          // ИЗМЕНЕНО: Убеждаемся, что остаемся в режиме приема
+          radio.startReceive();
+        }
+      }
+      else
+      {
+        Serial.print("Ошибка получения пакета: ");
+        Serial.println(state);
+        printText("Ошибка получения пакета!", lastText);
+        // ИЗМЕНЕНО: При ошибке тоже возвращаемся в прием
+        radio.startReceive();
+      }
+    }
+  }
+
+  //   if(temperature == "-127.00") {
+  //     printText("Error!", lastText);
+  //   } else
+  if (millis() - lastTime >= 100)
+  {
+    lastTime = millis();
+    printText(temperature, lastText);
+  }
+}
+#endif
+
+/**************************
+    MASTER LOOP
+ *************************/
+
+#ifdef MASTER_MODE
+enum MASTER_STATE
+{
+  WAIT_FOR_CLICK,
+  WAIT_FOR_RESPONSE,
+  WAIT_FOR_TX_DONE
+};
+MASTER_STATE code_state = WAIT_FOR_CLICK;
+unsigned long requestTime;
+
+void loop()
+{
+  // СОСТОЯНИЕ 1: Ожидание нажатия кнопки
+  if (code_state == WAIT_FOR_CLICK)
+  {
+    printTwoLines("Нажмите кнопку для", "запроса телеметрии", lastText);
+
+    if (digitalRead(BUTTON_PIN) == LOW)
+    {
+      delay(50); // Антидребезг контактов кнопки PRG
+      if (digitalRead(BUTTON_PIN) == LOW)
+      {
+
+        printText("Отправляю запрос...", lastText);
+        Serial.println("Кнопка нажата! Отправка пакета...");
+
+        Package txPacket;
+        txPacket.from_id = MASTER_ID;
+        txPacket.to_id = SLAVE_ID;
+        txPacket.type_package = REQUEST_ID;
+        txPacket.temperature = 0;
+
+        // ИЗМЕНЕНО: вместо radio.transmit используем radio.startTransmit
+        uint16_t state = radio.startTransmit((uint8_t *)&txPacket, sizeof(Package));
+
+        if (state == RADIOLIB_ERR_NONE)
+        {
+          Serial.println("Пакет начал отправку. Жду завершения TX.");
+          requestTime = millis();        // Фиксируем время отправки для таймаута
+          code_state = WAIT_FOR_TX_DONE; // Переходим в состояние ожидания завершения отправки
+        }
+        else
+        {
+          printText("Ошибка отправки", lastText);
+          Serial.print("Код ошибки LoRa: ");
+          Serial.println(state);
+          delay(2000);
+        }
+
+        // Ждем, пока пользователь отпустит кнопку PRG
+        while (digitalRead(BUTTON_PIN) == LOW);
+      }
+    }
+  }
+  else if (code_state == WAIT_FOR_TX_DONE)
+  {
+    if (interruptFlag)
+    {
+      interruptFlag = false;
+      uint16_t status = radio.getIrqStatus();
+
+      if (status & RADIOLIB_SX126X_IRQ_TX_DONE)
+      {
+        Serial.println("Пакет успешно отправлен! Включаю приемник.");
+        printTwoLines("Пакет отправлен", "Жду ответа", lastText);
+        radio.startReceive();           // Переводим SX1262 в режим прослушивания
+        requestTime = millis();         // Обновляем время для таймаута ответа
+        code_state = WAIT_FOR_RESPONSE; // Переключаем автомат
+      }
+    }
+
+    // Таймаут если передача зависла
+    if (millis() - requestTime >= 5000)
+    {
+      Serial.println("Таймаут передачи!");
+      printText("Ошибка передачи", lastText);
+      radio.standby();
+      delay(2000);
+      code_state = WAIT_FOR_CLICK;
+    }
+  }
+
+  // СОСТОЯНИЕ 3: Ожидание ответа от Слейва
+  else if (code_state == WAIT_FOR_RESPONSE)
+  {
+
+    // Сценарий А: Получен пакет по радиоканалу
+    if (interruptFlag)
+    {
+      interruptFlag = false;
+      uint16_t status = radio.getIrqStatus();
+
+      if (status & RADIOLIB_SX126X_IRQ_RX_DONE)
+      {
+        Package rxPacket;
+        uint16_t state = radio.readData((uint8_t *)&rxPacket, sizeof(Package));
+
+        if (state == RADIOLIB_ERR_NONE)
+        {
+          // Проверяем адресацию и тип пакета
+          if (rxPacket.from_id == SLAVE_ID && rxPacket.type_package == RESPONSE_ID)
+          {
+            Serial.print("Ответ получен! Температура: ");
+            Serial.println(rxPacket.temperature);
+
+            String msg = "Темп: " + String(rxPacket.temperature / 100.0) + " C";
+            printTwoLines("Данные приняты!", msg, lastText);
+
+            delay(5000);                 // Показываем результат 5 секунд
+            code_state = WAIT_FOR_CLICK; // Возвращаемся в исходное состояние
+          }
+          else
+          {
+            // Пакет не наш (чужой ID) — продолжаем слушать эфир
+            Serial.println("Получен чужой пакет. Игнорируем.");
+            radio.startReceive();
+          }
+        }
+        else
+        {
+          printText("Пакет ошибочный", lastText);
+          Serial.println("Ошибка декодирования пакета.");
+          delay(2000);
+          code_state = WAIT_FOR_CLICK;
+        }
+      }
+    }
+
+    // Сценарий Б: Слейв не ответил вовремя (Таймаут по TIMEOUT_TIME)
+    if (millis() - requestTime >= TIMEOUT_TIME)
+    {
+      Serial.println("Таймаут! Слейв не отвечает.");
+      printTwoLines("Ошибка связи:", "пакет не пришёл", lastText);
+
+      radio.standby();             // Переводим радио в режим ожидания (выключаем приемник)
+      delay(3000);                 // Показываем ошибку 3 секунды
+      code_state = WAIT_FOR_CLICK; // Возвращаемся к ожиданию кнопки
+    }
+  }
+
+  delay(10); // Разгрузка ядра микроконтроллера ESP32
+}
+#endif
