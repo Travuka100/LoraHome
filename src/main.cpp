@@ -5,28 +5,28 @@
 #include <ds18b20.h>
 #include <LoraHomeProtocol.h>
 
-#define BUTTON_PIN 0
+constexpr uint8_t BUTTON_PIN = 0;
 
 // !!! CHOOSE MODE BEFORE COMPILING !!!
  #define MASTER_MODE // - request the telemetry
 // #define SLAVE_MODE // - response the telemetry
 
 // PROTOCOL_LOGIC
-#define MASTER_ID 0x01
-#define SLAVE_ID 0x02
-#define TIMEOUT_TIME 10000
+constexpr uint8_t MASTER_ID = 0x01;
+constexpr uint8_t SLAVE_ID = 0x02;
+constexpr uint16_t TIMEOUT_TIME = 10000;
 
 // OLED
-#define OLED_SCL 18
-#define OLED_SDA 17
-#define OLED_RST 21
-#define VEXT_PIN 36
+constexpr uint8_t OLED_SCL = 18;
+constexpr uint8_t OLED_SDA = 17;
+constexpr uint8_t OLED_RST = 21;
+constexpr uint8_t VEXT_PIN = 36;
 
 // LORA
-#define LORA_NSS 8
-#define LORA_DIO1 14
-#define LORA_NRST 12
-#define LORA_BUSY 13
+constexpr uint8_t LORA_NSS   = 8;
+constexpr uint8_t LORA_DIO1  = 14;
+constexpr uint8_t LORA_NRST  = 12;
+constexpr uint8_t LORA_BUSY = 13;
 
 // GLOBAL VARIABLES
 String lastText = "";
