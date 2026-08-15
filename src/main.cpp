@@ -8,7 +8,7 @@
 #define BUTTON_PIN 0
 
 // !!! CHOOSE MODE BEFORE COMPILING !!!
-// #define MASTER_MODE // - request the telemetry
+ #define MASTER_MODE // - request the telemetry
 // #define SLAVE_MODE // - response the telemetry
 
 // PROTOCOL_LOGIC
@@ -40,6 +40,13 @@ U8G2_SSD1306_128X64_NONAME_1_SW_I2C u8g2(U8G2_R0, /* clock=*/OLED_SCL, /* data=*
 // U8G2_SSD1306_128X64_NONAME_1_SW_I2C u8g2(U8G2_R0, /* clock=*/ SCL, /* data=*/ SDA, /* reset=*/ U8X8_PIN_NONE);   // All Boards without Reset of the Display
 // U8G2_SSD1306_128X64_NONAME_1_SW_I2C u8g2(U8G2_R0, /* clock=*/ 16, /* data=*/ 17, /* reset=*/ U8X8_PIN_NONE);   // ESP32 Thing, pure SW emulated I2C
 SX1262 radio = new Module(LORA_NSS, LORA_DIO1, LORA_NRST, LORA_BUSY);
+
+void deepSleepOn(SX1262 &radio) {
+  esp_sleep_enable_ext0_wakeup(gpio_num_t(BUTTON_PIN), 0);
+  radio.sleep();
+  digitalWrite(VEXT_PIN, LOW);
+  esp_deep_sleep_start();
+}
 
 bool buttonHold(unsigned long& lastPressedTime, bool& button_pressed, uint16_t hold_time_ms, uint16_t timeout_hold_ms, uint8_t button_pin)
 {
@@ -255,8 +262,9 @@ void loop()
     printTwoLines("Нажмите кнопку для", "запроса телеметрии", lastText);
     if (buttonHold(lastPresssed, buttonPressed, 2000, 5000, BUTTON_PIN))
     {
-      printText("Кнопка нажата!", lastText);
+      printText("Выключениe...!", lastText);
       delay(1000);
+      deepSleepOn(radio);
     }
     if (buttonFastPressed(100, 2000, BUTTON_PIN))
     {
