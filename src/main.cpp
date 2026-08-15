@@ -8,7 +8,7 @@
 #define BUTTON_PIN 0
 
 // !!! CHOOSE MODE BEFORE COMPILING !!!
-// #define MASTER_MODE   // - request the telemetry
+// #define MASTER_MODE // - request the telemetry
 // #define SLAVE_MODE // - response the telemetry
 
 // PROTOCOL_LOGIC
@@ -32,7 +32,6 @@
 String lastText = "";
 volatile bool interruptFlag = false;
 unsigned long lastTime = 0;
-bool Button_pressed = false;
 
 OneWire oneWire(4);
 DallasTemperature sensor(&oneWire);
@@ -42,6 +41,41 @@ U8G2_SSD1306_128X64_NONAME_1_SW_I2C u8g2(U8G2_R0, /* clock=*/OLED_SCL, /* data=*
 // U8G2_SSD1306_128X64_NONAME_1_SW_I2C u8g2(U8G2_R0, /* clock=*/ 16, /* data=*/ 17, /* reset=*/ U8X8_PIN_NONE);   // ESP32 Thing, pure SW emulated I2C
 SX1262 radio = new Module(LORA_NSS, LORA_DIO1, LORA_NRST, LORA_BUSY);
 
+bool buttonHold(unsigned long& lastPressedTime, bool& button_pressed, uint16_t hold_time_ms, uint16_t timeout_hold_ms, uint8_t button_pin)
+{
+
+  if (digitalRead(button_pin) == LOW && !button_pressed)
+  {
+    button_pressed = true;
+
+    lastPressedTime = millis();
+  }
+
+  if (millis() - lastPressedTime >= hold_time_ms && millis() - lastPressedTime < timeout_hold_ms && button_pressed)
+  {
+    if (digitalRead(button_pin) == HIGH)
+    {
+      lastPressedTime = 0;
+      button_pressed = false;
+      return true;
+    }
+  } else if (button_pressed && digitalRead(button_pin) == HIGH)
+    {
+      button_pressed = false;
+      lastPressedTime = 0;
+      return false;
+    }
+
+    return false;
+
+}
+
+bool buttonFastPressed(uint16_t hold_time_ms, uint16_t timeout_hold_ms, uint8_t button_pin)
+{
+  static unsigned long lastPressed = 0;
+  static bool button_pressed = false;
+  return buttonHold(lastPressed, button_pressed, hold_time_ms, timeout_hold_ms, button_pin);
+}
 
 void setFlag()
 {
@@ -164,7 +198,7 @@ void loop()
           {
             Serial.print("Ошибка отправки ответа: ");
             Serial.println(state_tx);
-            
+
             radio.startReceive();
           }
         }
@@ -172,7 +206,7 @@ void loop()
         {
           Serial.println("Получен пакет не от мастера или не запрос");
           printText("Пакет не наш", lastText);
-          
+
           radio.startReceive();
         }
       }
@@ -181,7 +215,7 @@ void loop()
         Serial.print("Ошибка получения пакета: ");
         Serial.println(state);
         printText("Ошибка получения пакета!", lastText);
-        
+
         radio.startReceive();
       }
     }
@@ -214,44 +248,45 @@ unsigned long requestTime;
 
 void loop()
 {
+  static unsigned long lastPresssed = 0;
+  static bool buttonPressed = 0;
   if (code_state == WAIT_FOR_CLICK)
   {
     printTwoLines("Нажмите кнопку для", "запроса телеметрии", lastText);
-
-    if (digitalRead(BUTTON_PIN) == LOW)
+    if (buttonHold(lastPresssed, buttonPressed, 2000, 5000, BUTTON_PIN))
     {
-      delay(50); 
-      if (digitalRead(BUTTON_PIN) == LOW)
+      printText("Кнопка нажата!", lastText);
+      delay(1000);
+    }
+    if (buttonFastPressed(100, 2000, BUTTON_PIN))
+    {
+
+      printText("Отправляю запрос...", lastText);
+      Serial.println("Кнопка нажата! Отправка пакета...");
+
+      Package txPacket;
+      txPacket.from_id = MASTER_ID;
+      txPacket.to_id = SLAVE_ID;
+      txPacket.type_package = request;
+      txPacket.temperature = 0;
+
+      uint16_t state = radio.startTransmit((uint8_t *)&txPacket, sizeof(Package));
+
+      if (state == RADIOLIB_ERR_NONE)
       {
-
-        printText("Отправляю запрос...", lastText);
-        Serial.println("Кнопка нажата! Отправка пакета...");
-
-        Package txPacket;
-        txPacket.from_id = MASTER_ID;
-        txPacket.to_id = SLAVE_ID;
-        txPacket.type_package = request;
-        txPacket.temperature = 0;
-
-        uint16_t state = radio.startTransmit((uint8_t *)&txPacket, sizeof(Package));
-
-        if (state == RADIOLIB_ERR_NONE)
-        {
-          Serial.println("Пакет начал отправку. Жду завершения TX.");
-          requestTime = millis();        
-          code_state = WAIT_FOR_TX_DONE; 
-        }
-        else
-        {
-          printText("Ошибка отправки", lastText);
-          Serial.print("Код ошибки LoRa: ");
-          Serial.println(state);
-          delay(2000);
-        }
-
-        
-        while (digitalRead(BUTTON_PIN) == LOW);
+        Serial.println("Пакет начал отправку. Жду завершения TX.");
+        requestTime = millis();
+        code_state = WAIT_FOR_TX_DONE;
       }
+      else
+      {
+        printText("Ошибка отправки", lastText);
+        Serial.print("Код ошибки LoRa: ");
+        Serial.println(state);
+        delay(2000);
+      }
+
+      while (digitalRead(BUTTON_PIN) == LOW);
     }
   }
   else if (code_state == WAIT_FOR_TX_DONE)
@@ -265,9 +300,9 @@ void loop()
       {
         Serial.println("Пакет успешно отправлен! Включаю приемник.");
         printTwoLines("Пакет отправлен", "Жду ответа", lastText);
-        radio.startReceive();           
-        requestTime = millis();         
-        code_state = WAIT_FOR_RESPONSE; 
+        radio.startReceive();
+        requestTime = millis();
+        code_state = WAIT_FOR_RESPONSE;
       }
     }
 
@@ -281,7 +316,6 @@ void loop()
     }
   }
 
- 
   else if (code_state == WAIT_FOR_RESPONSE)
   {
     if (interruptFlag)
@@ -296,7 +330,7 @@ void loop()
 
         if (state == RADIOLIB_ERR_NONE)
         {
-        
+
           if (rxPacket.from_id == SLAVE_ID && rxPacket.type_package == response)
           {
             Serial.print("Ответ получен! Температура: ");
@@ -305,12 +339,12 @@ void loop()
             String msg = "Темп: " + String(rxPacket.temperature / 100.0) + " C";
             printTwoLines("Данные приняты!", msg, lastText);
 
-            delay(5000);                 
+            delay(5000);
             code_state = WAIT_FOR_CLICK;
           }
           else
           {
-      
+
             Serial.println("Получен чужой пакет. Игнорируем.");
             radio.startReceive();
           }
@@ -329,9 +363,9 @@ void loop()
       Serial.println("Таймаут! Слейв не отвечает.");
       printTwoLines("Ошибка связи:", "пакет не пришёл", lastText);
 
-      radio.standby();  
-      delay(3000);                 
-      code_state = WAIT_FOR_CLICK; 
+      radio.standby();
+      delay(3000);
+      code_state = WAIT_FOR_CLICK;
     }
   }
 }
