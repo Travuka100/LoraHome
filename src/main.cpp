@@ -4,7 +4,11 @@
 #include <RadioLib.h>
 #include <ds18b20.h>
 #include <LoraHomeProtocol.h>
-
+// TODO: Добавить отображение заряда батареи(либо как значок, либо процентами)
+// TODO: Добавить повторную отправку пакета, если не пришёл ответ
+// TODO: Улучшить глубокий сон
+// TODO: отладить логику отправки и приёма
+// TODO: Сделать README.md
 constexpr uint8_t BUTTON_PIN = 0;
 
 // !!! CHOOSE MODE BEFORE COMPILING !!!
@@ -182,7 +186,7 @@ void loop()
 
       if (state == RADIOLIB_ERR_NONE)
       {
-        if (rxPacket.from_id == MASTER_ID && rxPacket.type_package == response)
+        if (rxPacket.from_id == MASTER_ID && rxPacket.type_package == request)
         {
 
           Serial.println("Получен запрос! Формирую ответ...");
