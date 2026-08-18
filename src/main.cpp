@@ -48,7 +48,7 @@ SX1262 radio = new Module(LORA_NSS, LORA_DIO1, LORA_NRST, LORA_BUSY);
 void deepSleepOn(SX1262 &radio) {
   esp_sleep_enable_ext0_wakeup(gpio_num_t(BUTTON_PIN), 0);
   radio.sleep();
-  digitalWrite(VEXT_PIN, LOW);
+  digitalWrite(VEXT_PIN, HIGH);
   esp_deep_sleep_start();
 }
 
