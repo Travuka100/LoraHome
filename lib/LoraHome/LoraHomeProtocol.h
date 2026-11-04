@@ -36,7 +36,15 @@ namespace lorahome {
 constexpr uint8_t MAGIC = 'H';
 constexpr uint8_t PROTOCOL_VERSION = 0x02;
 constexpr uint8_t MAX_SENSORS = 2;
-constexpr uint16_t TEMP_INVALID = 0xFFFF; // sentinel for "no reading"
+
+// Sentinel for "no reading". The wire field is int16_t, so the sentinel MUST
+// be defined as int16_t(-1) == 0xFFFF. Defining it as uint16_t 0xFFFF and
+// then static_cast<int16_t>-ing it silently turns the comparison
+// "t != (int16_t)TEMP_INVALID" into "t != -1", which was the root cause of
+// the receiver always showing "--.-": the sender's guard compared a valid
+// encoded temperature (e.g. 2134) against the WRONG sentinel value (-1 vs
+// 0xFFFF after cast), so the validity flag could never be set reliably.
+constexpr int16_t TEMP_INVALID = static_cast<int16_t>(0xFFFF); // == -1
 
 constexpr uint8_t FLAG_TEMP1_VALID = 0x01;
 constexpr uint8_t FLAG_TEMP2_VALID = 0x02;
