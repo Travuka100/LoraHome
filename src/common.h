@@ -24,10 +24,12 @@ constexpr uint8_t RECEIVER_ID = 0x01; // handheld receiver (battery, button)
 constexpr uint8_t SENDER_ID = 0x02;   // transmitter with 2x DS18B20 (mains)
 
 // Timing constants (ms). LoRa PHY is SF12/125kHz: one 16-byte frame is on
-// air ~1.1 s, so a full request->response round takes ~2.5 s. The per-attempt
-// response window covers sender sensor refresh (up to ~1 s) + its TX time.
+// air ~1.1 s, so a full request->response round takes ~2.5 s. The response
+// window MUST exceed the sender's blocking DS18B20 read (~0.75 s) + its TX
+// time; 7 s gives comfortable margin. Retries happen ONLY after the window
+// fully expired, always announced on screen ("Повтор 2 из 3").
 constexpr uint32_t IRQ_WAIT_TX_MS = 8000;       // max wait for TX_DONE
-constexpr uint32_t RESPONSE_TIMEOUT_MS = 6000;  // wait for response per attempt
+constexpr uint32_t RESPONSE_TIMEOUT_MS = 7000;  // wait for response per attempt
 constexpr uint8_t MAX_ATTEMPTS = 3;             // request transmissions total
 constexpr uint32_t RETRY_BACKOFF_MS = 300;      // pause between retries
 constexpr uint32_t DISPLAY_HOLD_MS = 15000;     // result screen hold

@@ -7,14 +7,16 @@ static volatile bool s_interruptFlag = false;
 static void IRAM_ATTR onDio1_isr() { s_interruptFlag = true; }
 
 // --- Display ------------------------------------------------------------------
-// Layout of the 128x64 SSD1306 (U8g2 "F" = full-buffer, no flicker):
+// Layout of the 128x64 SSD1306 (U8g2 "F" = full-buffer, no flicker).
+// EVERYTHING is drawn with ONE small font (6x13) so text never overlaps and
+// never shifts between screens:
 //
 //   +------------------------------+
-//   | Title              [_|__] 85%|  <- header row, battery icon top-right
-//   |------------------------------|  <- thin separator line
-//   | body line 1                    |
-//   | body line 2                    |
-//   | body line 3                    |
+//   | Title               [ _ ]    |  <- row 0: title left, battery top-right
+//   |------------------------------|  <- separator
+//   |        body line 1           |  <- rows 1..3, centered
+//   |        body line 2           |
+//   |        body line 3           |
 //   +------------------------------+
 //
 // Redraws are change-deduplicated to spare the OLED and the CPU.
@@ -24,17 +26,19 @@ static char s_lastL2[40] = "";
 static char s_lastL3[40] = "";
 static uint8_t s_lastBatt = 0xFF; // 0xFF = not drawn yet
 
-// Battery pictogram: 18x9 body + 2x3 cap, drawn at (x, y) top-left corner.
-static void drawBatteryIcon(uint8_t pct) {
-  const int x = 128 - 18 - 2; // right margin 2 px
-  const int y = 2;
-  display.drawFrame(x, y, 18, 9);           // body outline
-  display.drawBox(x + 18, y + 3, 2, 3); // positive terminal nub
+constexpr uint8_t kNoBattery = 0xFE; // sender: don't draw the icon at all
 
-  const int innerW = 16; // drawable area inside the frame
+// Battery pictogram: 16x8 body + 2x3 cap, snug in the TOP-RIGHT corner.
+static void drawBatteryIcon(uint8_t pct) {
+  const int x = 128 - 16 - 2 - 2; // body + cap + right margin
+  const int y = 2;
+  display.drawFrame(x, y, 16, 8);      // body outline
+  display.drawBox(x + 16, y + 2, 2, 3); // positive terminal nub
+
+  const int innerW = 14; // drawable area inside the frame
   const int filled = (innerW * static_cast<int>(pct)) / 100;
   if (filled > 0) {
-    display.drawBox(x + 1, y + 1, filled, 7);
+    display.drawBox(x + 1, y + 1, filled, 6);
   }
 }
 
@@ -49,7 +53,7 @@ void uiDraw(const char *title, uint8_t battPct, const char *l1, const char *l2,
   if (strcmp(title, s_lastTitle) == 0 && strcmp(l1, s_lastL1) == 0 &&
       strcmp(l2, s_lastL2) == 0 && strcmp(l3, s_lastL3) == 0 &&
       battPct == s_lastBatt) {
-    return; // nothing changed -> no SPI traffic, no flicker
+    return; // nothing changed -> no I2C traffic, no flicker
   }
   strlcpy(s_lastTitle, title, sizeof(s_lastTitle));
   strlcpy(s_lastL1, l1, sizeof(s_lastL1));
@@ -58,18 +62,20 @@ void uiDraw(const char *title, uint8_t battPct, const char *l1, const char *l2,
   s_lastBatt = battPct;
 
   display.clearBuffer();
-
-  // Header: bold-ish title on the left, battery in the TOP-RIGHT corner.
-  display.setFont(u8g2_font_10x20_t_cyrillic);
-  display.setCursor(0, 12);
-  display.print(s_lastTitle);
-  drawBatteryIcon(s_lastBatt);
-  display.drawLine(0, 15, 127, 15); // separator
-
-  // Body lines: centered horizontally for a clean "menu" look.
+  display.enableUTF8Print(); // must be re-enabled after every clearBuffer()
   display.setFont(u8g2_font_6x13_t_cyrillic);
+
+  // Header row: title on the left, battery icon in the top-right corner.
+  display.setCursor(2, 10);
+  display.print(s_lastTitle);
+  if (s_lastBatt != kNoBattery) {
+    drawBatteryIcon(s_lastBatt);
+  }
+  display.drawLine(0, 13, 127, 13); // separator
+
+  // Body lines: one fixed slot each, centered — stable, never "shifts".
   const char *lines[3] = {s_lastL1, s_lastL2, s_lastL3};
-  const int8_t baselines[3] = {31, 46, 61};
+  const int8_t baselines[3] = {28, 42, 56};
   for (uint8_t i = 0; i < 3; ++i) {
     if (lines[i][0] == '\0') continue;
     const int16_t w = display.getStrWidth(lines[i]);
@@ -177,7 +183,11 @@ bool pollReceive(uint8_t expectFrom, uint8_t expectType, uint32_t sliceMs) {
   if (irq < 0) return false; // nothing arrived in this slice
 
   if (!(irq & RADIOLIB_SX126X_IRQ_RX_DONE)) {
-    radio.startReceive(); // spurious/timeout IRQ -> keep listening
+    // SX1262 stops its receiver on TIMEOUT — only re-arm in that case,
+    // otherwise startReceive() during an ongoing RX corrupts state and can
+    // make the module deaf ("sender says request answered, receiver sees
+    // nothing"). Any other IRQ (error/CRC) leaves RX running untouched.
+    if (irq & RADIOLIB_SX126X_IRQ_TIMEOUT) radio.startReceive();
     return false;
   }
 
