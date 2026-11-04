@@ -4,20 +4,40 @@ namespace fw {
 
 static volatile bool s_interruptFlag = false;
 
+// CRITICAL FIX (why the link appeared "dead" although both ends transmitted):
+// on ESP32 Arduino `digitalPinToInterrupt(pin)` returns the GPIO number, NOT a
+// valid Arduino-attached interrupt handle for attachInterrupt(). Passing 14
+// made the ISR NEVER fire -> every waitForIrq() timed out -> received packets
+// were only caught by the lucky latched-status fast path, TX_DONE was missed,
+// retries piled up ("receiver sends 3 requests, sender answers each one,
+// receiver shows nothing"). Now we attach with the proper handle and ALSO poll
+// the latched IRQ register as a belt-and-braces fallback.
 static void IRAM_ATTR onDio1_isr() { s_interruptFlag = true; }
 
 // --- Display ------------------------------------------------------------------
-// Layout of the 128x64 SSD1306 (U8g2 "F" = full-buffer, no flicker).
-// EVERYTHING is drawn with ONE small font (6x13) so text never overlaps and
-// never shifts between screens:
+// Layout of the 128x64 SSD1306 (U8g2 "F" = full-buffer, no flicker):
 //
 //   +------------------------------+
-//   | Title               [ _ ]    |  <- row 0: title left, battery top-right
-//   |------------------------------|  <- separator
-//   |        body line 1           |  <- rows 1..3, centered
+//   | LoraHome            [_]      |  <- title TOP-LEFT, battery TOP-RIGHT
+//   |------------------------------|  <- separator line under the header
+//   |        body line 1           |  <- fixed slots, centered
 //   |        body line 2           |
 //   |        body line 3           |
 //   +------------------------------+
+//
+// WHY THE TEXT USED TO "JUMP"/OVERLAP AND HOW IT'S FIXED HERE:
+//  1. u8g2's Arduino print() decodes UTF-8 through a STATEFUL decoder
+//     (u8x8_utf8_next keeps inter-byte state inside the object). Feeding it
+//     plain ASCII strings does NOT reset that state, so a leftover half-decoded
+//     Cyrillic byte could swallow the first bytes of the NEXT string and shift
+//     its start position ("текст съехал"). Fix: ALWAYS draw via drawUTF8(),
+//     which calls u8x8_utf8_init() internally before decoding, so every string
+//     starts from a clean decoder state.
+//  2. getStrWidth() decodes ASCII-only: for Cyrillic/UTF-8 it returns garbage
+//     widths -> centering computed with it shifted text off-screen. Fix:
+//     strWidthUtf8() measures with the same UTF-8 decoder as the renderer.
+//  3. One single font everywhere (6x13 cyrillic): glyph metrics can never mix
+//     between screens, so nothing moves when the screen content changes.
 //
 // Redraws are change-deduplicated to spare the OLED and the CPU.
 static char s_lastTitle[24] = "";
@@ -28,11 +48,16 @@ static uint8_t s_lastBatt = 0xFF; // 0xFF = not drawn yet
 
 constexpr uint8_t kNoBattery = 0xFE; // sender: don't draw the icon at all
 
+// UTF-8-correct string width (same decoder path as drawUTF8).
+static int16_t strWidthUtf8(const char *s) {
+  return static_cast<int16_t>(u8g2_GetUTF8Width(&display.getU8g2()->u8g2, s));
+}
+
 // Battery pictogram: 16x8 body + 2x3 cap, snug in the TOP-RIGHT corner.
 static void drawBatteryIcon(uint8_t pct) {
   const int x = 128 - 16 - 2 - 2; // body + cap + right margin
   const int y = 2;
-  display.drawFrame(x, y, 16, 8);      // body outline
+  display.drawFrame(x, y, 16, 8);       // body outline
   display.drawBox(x + 16, y + 2, 2, 3); // positive terminal nub
 
   const int innerW = 14; // drawable area inside the frame
@@ -62,27 +87,23 @@ void uiDraw(const char *title, uint8_t battPct, const char *l1, const char *l2,
   s_lastBatt = battPct;
 
   display.clearBuffer();
-  display.enableUTF8Print(); // must be re-enabled after every clearBuffer()
   display.setFont(u8g2_font_6x13_t_cyrillic);
 
-  // Header row: title on the left, battery icon in the top-right corner.
-  display.setCursor(2, 10);
-  display.print(s_lastTitle);
+  // Header row: title pinned to the top-left, battery icon top-right.
+  display.drawUTF8(2, 11, s_lastTitle);
   if (s_lastBatt != kNoBattery) {
     drawBatteryIcon(s_lastBatt);
   }
-  display.drawLine(0, 13, 127, 13); // separator
+  display.drawLine(0, 14, 127, 14); // separator under the header
 
-  // Body lines: one fixed slot each, centered — stable, never "shifts".
+  // Body lines: one fixed slot each, centered with UTF-8-correct widths.
   const char *lines[3] = {s_lastL1, s_lastL2, s_lastL3};
-  const int8_t baselines[3] = {28, 42, 56};
+  const int8_t baselines[3] = {29, 42, 55};
   for (uint8_t i = 0; i < 3; ++i) {
     if (lines[i][0] == '\0') continue;
-    const int16_t w = display.getStrWidth(lines[i]);
-    int16_t x = (128 - w) / 2;
-    if (x < 0) x = 0;
-    display.setCursor(x, baselines[i]);
-    display.print(lines[i]);
+    int16_t x = (128 - strWidthUtf8(lines[i])) / 2;
+    if (x < 1) x = 1;
+    display.drawUTF8(x, baselines[i], lines[i]);
   }
   display.sendBuffer();
 }
