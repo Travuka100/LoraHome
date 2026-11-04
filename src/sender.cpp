@@ -71,7 +71,8 @@ void handleRequest(const lorahome::Packet &req) {
     }
     if (i == 0) resp.temp1 = t; else resp.temp2 = t;
   }
-  // battery_mv stays 0: sender is mains powered by design.
+  // The receiver displays its OWN battery on screen; the sender is mains
+  // powered and has no battery to report (stays 0 by design).
   lorahome::finalize(resp);
 
   const int st = fw::transmitAndWait(resp);

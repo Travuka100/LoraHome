@@ -14,7 +14,7 @@ namespace board {
 // --- Pin mapping (Heltec WiFi LoRa 32 V3 / ESP32-SX1262) -------------------
 constexpr uint8_t BUTTON_PIN = 0; // front button, active LOW (INPUT_PULLUP)
 constexpr uint8_t VEXT_PIN = 36;  // enables 3V3 to OLED/LoRa periphery
-constexpr uint8_t BAT_ADC_PIN = 37; // battery voltage divider (LiPo)
+constexpr uint8_t BAT_ADC_PIN = 35; // battery divider tap (ADC1_CH7 on V3)
 constexpr uint8_t OLED_SCL = 18;
 constexpr uint8_t OLED_SDA = 17;
 constexpr uint8_t OLED_RST = 21;
@@ -25,12 +25,25 @@ constexpr uint8_t LORA_BUSY = 13;
 constexpr uint8_t ONEWIRE_PIN = 4;
 
 // --- LoRa PHY (must be identical on both ends!) -----------------------------
+// SF9/125kHz chosen over SF12: ~3x shorter airtime (request ~0.5 s instead
+// of ~1.5 s per hop) while keeping a huge link budget for indoor use.
 constexpr float LORA_FREQ = 868.7f;
 constexpr float LORA_BW = 125.0f;
-constexpr uint8_t LORA_SF = 12;
+constexpr uint8_t LORA_SF = 9;
 constexpr int8_t LORA_CR = 5;     // coding rate 4/5
-constexpr int8_t LORA_POWER = 14; // dBm
+constexpr int8_t LORA_POWER = 20; // dBm (SX1262 max, Heltec V3 PA supports it)
 constexpr uint8_t LORA_PREAMBLE = 8;
+
+// --- Battery divider ----------------------------------------------------------
+// Heltec WiFi LoRa 32 V3: R1 = 220 kOhm (top), R2 = 100 kOhm (bottom),
+// Vbat = Vadc * (R1+R2)/R2 = Vadc * 3.2. The old firmware used the V2
+// divider constant (2.34) AND read ADC1/GPIO37 which is strapped LOW by the
+// on-board antenna switch -> raw ADC ~0 -> "battery always 0%".
+constexpr float BAT_DIVIDER = 3.2f;
+
+// Heltec V3 battery ADC tap is GPIO35 (ADC1_CH7). GPIO36/37 on this board
+// are consumed by VEXT control and the antenna-switch network respectively,
+// reading them yields ~0 mV -> "battery always 0%".
 
 // --- Button events ----------------------------------------------------------
 enum class ButtonEvent : uint8_t {

@@ -57,40 +57,53 @@ ButtonEvent Button::event() {
 // Radio
 // ---------------------------------------------------------------------------
 int radioBegin(SX1262 &radio) {
-  int state = radio.begin(LORA_FREQ, LORA_BW, LORA_SF, LORA_CR, LORA_POWER,
-                          8 /* preamble length in symbols */);
+  // Heltec V3 wiring: SX1262 DIO2 drives the RF switch and DIO3 powers the
+  // TCXO. Without these two calls the PA/antenna path stays dead -> the
+  // module "transmits" but nothing is radiated (classic "peer never answers"
+  // symptom on this board).
+  int state = radio.setDio2AsRfSwitch(true);
+  if (state != RADIOLIB_ERR_NONE) return state;
+
+  state = radio.setTCXO(3.4f); // 3.4 V TCXO supply via DIO3
+  if (state != RADIOLIB_ERR_NONE) {
+    Serial.printf("setTCXO status %d\n", state);
+    // Non-fatal on modules with plain crystal: continue bring-up anyway.
+  }
+
+  state = radio.begin(LORA_FREQ, LORA_BW, LORA_SF, LORA_CR, LORA_POWER,
+                      LORA_PREAMBLE);
   if (state != RADIOLIB_ERR_NONE) return state;
 
   // Explicit header + payload CRC => transceiver drops corrupted packets.
   state = radio.setCRC(true);
   if (state != RADIOLIB_ERR_NONE) return state;
 
-  radio.setOutputPower(LORA_POWER);
-  radio.setPreambleLength(LORA_PREAMBLE);
-  // Invert IQ only needed on some boards at certain freqs; Heltec V3 uses
-  // the default non-inverted path for 868 MHz.
   return RADIOLIB_ERR_NONE;
 }
 
 // ---------------------------------------------------------------------------
 // Battery
 // ---------------------------------------------------------------------------
-// Heltec V3 battery divider: 6.3M / 4.7M -> Vbat = Vad * ~2.34 (+ calib).
-constexpr float kAdcDivider = 2.34f;
+// Heltec V3 divider: 220k / 100k -> Vbat = Vad * 3.2 (see Board.h).
+// Reading is taken from GPIO35 (ADC1_CH7). The previous firmware used the
+// V2 constant (2.34) and GPIO37, which on the V3 is tied LOW through the
+// antenna-switch resistor network -> ADC always ~0 mV -> "battery 0%".
 constexpr uint16_t kEmptyMv = 3300;
 constexpr uint16_t kFullMv = 4200;
 
 uint16_t batteryMillivolts() {
   analogSetPinAttenuation(BAT_ADC_PIN, ADC_11db);
   analogReadResolution(12);
-  // Median of several samples rejects ADC spikes.
-  uint16_t samples[7];
-  for (size_t i = 0; i < 7; ++i) {
+
+  // Take 9 samples, drop the extremes, average the rest (spike rejection).
+  constexpr size_t N = 9;
+  uint16_t samples[N];
+  for (size_t i = 0; i < N; ++i) {
     samples[i] = static_cast<uint16_t>(analogReadMilliVolts(BAT_ADC_PIN));
     delayMicroseconds(200);
   }
-  // Simple insertion sort (n=7).
-  for (size_t i = 1; i < 7; ++i) {
+  // Simple insertion sort (n=9).
+  for (size_t i = 1; i < N; ++i) {
     uint16_t v = samples[i];
     size_t j = i;
     while (j > 0 && samples[j - 1] > v) {
@@ -99,7 +112,10 @@ uint16_t batteryMillivolts() {
     }
     samples[j] = v;
   }
-  const uint32_t mv = static_cast<uint32_t>(samples[3] * kAdcDivider);
+  uint32_t acc = 0;
+  for (size_t i = 2; i < N - 2; ++i) acc += samples[i]; // trimmed mean
+  const float rawMv = static_cast<float>(acc) / (N - 4);
+  const uint32_t mv = static_cast<uint32_t>(rawMv * BAT_DIVIDER);
   return static_cast<uint16_t>(mv > 5000 ? 5000 : mv); // clamp sanity
 }
 

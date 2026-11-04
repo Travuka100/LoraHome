@@ -25,9 +25,10 @@ constexpr uint8_t SENDER_ID = 0x02;   // transmitter with 2x DS18B20 (mains)
 
 // Timing constants (ms)
 constexpr uint32_t IRQ_WAIT_TX_MS = 5000;      // max wait for TX_DONE
-constexpr uint32_t RESPONSE_TIMEOUT_MS = 8000; // wait for response per attempt
-constexpr uint8_t MAX_ATTEMPTS = 3;            // request retransmissions
-constexpr uint32_t RETRY_BACKOFF_MS = 250;     // pause between retries
+constexpr uint32_t RESPONSE_TIMEOUT_MS = 1500; // wait for response per attempt
+                                               // (SF9 airtime ~0.4 s/hop -> ample)
+constexpr uint8_t MAX_ATTEMPTS = 4;            // request retransmissions
+constexpr uint32_t RETRY_BACKOFF_MS = 120;     // pause between retries
 constexpr uint32_t DISPLAY_HOLD_MS = 5000;     // result screen hold
 constexpr uint32_t IDLE_SLEEP_MS = 60000;      // auto deep sleep (receiver)
 constexpr uint16_t BTN_DEBOUNCE_MS = 30;
