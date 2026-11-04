@@ -74,6 +74,18 @@ int radioBegin(SX1262 &radio) {
                       LORA_PREAMBLE);
   if (state != RADIOLIB_ERR_NONE) return state;
 
+  // Maximum range profile explicitly, one setting at a time so a rejected
+  // value can never silently break the whole configuration:
+  (void)radio.setFrequency(LORA_FREQ);
+  (void)radio.setBandwidth(LORA_BW);
+  (void)radio.setSpreadingFactor(LORA_SF); // SF12 - most robust
+  (void)radio.setCodingRate(LORA_CR);      // 4/5
+  (void)radio.setPreambleLength(LORA_PREAMBLE);
+  state = radio.setOutputPower(LORA_POWER); // 22 dBm (SX1262 max)
+  if (state != RADIOLIB_ERR_NONE) return state;
+  // Allow the PA to draw the current needed for 22 dBm (default OCP is 140 mA).
+  (void)radio.setCurrentLimit(2.4f);
+
   // Explicit header + payload CRC => transceiver drops corrupted packets.
   state = radio.setCRC(true);
   if (state != RADIOLIB_ERR_NONE) return state;
@@ -84,24 +96,33 @@ int radioBegin(SX1262 &radio) {
 // ---------------------------------------------------------------------------
 // Battery
 // ---------------------------------------------------------------------------
-// Heltec V3 divider: 220k / 100k -> Vbat = Vad * 3.2 (see Board.h).
-// Reading is taken from GPIO35 (ADC1_CH7). The previous firmware used the
-// V2 constant (2.34) and GPIO37, which on the V3 is tied LOW through the
-// antenna-switch resistor network -> ADC always ~0 mV -> "battery 0%".
+// Heltec WiFi LoRa 32 V3 (ESP32-S3): the battery divider is gated by
+// VBAT_CTRL = GPIO37 and its tap goes to GPIO1 (ADC1_CH0). Reading any other
+// pin (e.g. 35/36/37 themselves) always yields ~0 mV -> "battery 0%".
+// Procedure mirrors Heltec's own library (heltec_vbat()): drive 37 LOW to
+// connect the 220k/100k divider, settle, sample, release the gate again.
 constexpr uint16_t kEmptyMv = 3300;
 constexpr uint16_t kFullMv = 4200;
 
 uint16_t batteryMillivolts() {
-  analogSetPinAttenuation(BAT_ADC_PIN, ADC_11db);
+  analogSetPinAttenuation(VBAT_ADC_PIN, ADC_11db);
   analogReadResolution(12);
+
+  pinMode(VBAT_CTRL_PIN, OUTPUT);
+  digitalWrite(VBAT_CTRL_PIN, LOW); // divider ON
+  delay(5);                         // settling time per Heltec reference code
 
   // Take 9 samples, drop the extremes, average the rest (spike rejection).
   constexpr size_t N = 9;
   uint16_t samples[N];
   for (size_t i = 0; i < N; ++i) {
-    samples[i] = static_cast<uint16_t>(analogReadMilliVolts(BAT_ADC_PIN));
+    samples[i] = static_cast<uint16_t>(analogReadMilliVolts(VBAT_ADC_PIN));
     delayMicroseconds(200);
   }
+
+  digitalWrite(VBAT_CTRL_PIN, HIGH); // keep divider unpowered between reads
+  pinMode(VBAT_CTRL_PIN, INPUT);
+
   // Simple insertion sort (n=9).
   for (size_t i = 1; i < N; ++i) {
     uint16_t v = samples[i];
