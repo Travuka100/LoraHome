@@ -18,7 +18,7 @@
 // Global objects declared extern in common.h
 SX1262 fw::radio = SX1262(new Module(board::LORA_NSS, board::LORA_DIO1,
                                      board::LORA_NRST, board::LORA_BUSY));
-U8G2_SSD1306_128X64_NONAME_1_SW_I2C
+U8G2_SSD1306_128X64_NONAME_F_SW_I2C
     fw::display(U8G2_R0, board::OLED_SCL, board::OLED_SDA, board::OLED_RST);
 
 namespace {
@@ -41,6 +41,18 @@ void formatTemp(char *buf, size_t n, int idx) {
   } else {
     snprintf(buf, n, "D%d: --.- C", idx + 1);
   }
+}
+
+void drawStatus(const char *note) {
+  char l1[40], l2[40];
+  if (g_sensors.count() == 0) {
+    fw::uiDraw("Передатчик", 0xFF, "Нет датчиков 1-Wire!",
+               "проверьте GPIO4/подтяжку", nullptr);
+    return;
+  }
+  formatTemp(l1, sizeof(l1), 0);
+  formatTemp(l2, sizeof(l2), 1);
+  fw::uiDraw("Передатчик", 0xFF, l1, l2, note);
 }
 
 void handleRequest(const lorahome::Packet &req) {
@@ -78,11 +90,13 @@ void handleRequest(const lorahome::Packet &req) {
   const int st = fw::transmitAndWait(resp);
   if (st == RADIOLIB_ERR_NONE) {
     Serial.println("Response sent.");
-    fw::showLines("Запрос принят", "Ответ отправлен");
+    drawStatus("Запрос принят, ответ отправлен");
+    g_lastDisplayMs = millis();
   } else {
     Serial.print("Response TX failed: ");
     Serial.println(st);
-    fw::showLines("Ошибка ответа", nullptr);
+    drawStatus("Ошибка ответа!");
+    g_lastDisplayMs = millis();
   }
 }
 
@@ -98,7 +112,7 @@ void setup() {
   char buf[40];
   snprintf(buf, sizeof(buf), "Датчиков найдено: %d", found);
   Serial.println(buf);
-  fw::showLines("Передатчик LoraHome", buf);
+  fw::uiDraw("Передатчик", 0xFF, buf, nullptr, nullptr);
 
   g_sensors.refresh(); // first synchronous reading
   g_lastRefreshMs = millis();
@@ -114,14 +128,7 @@ void loop() {
   // --- local display ---------------------------------------------------------
   if (millis() - g_lastDisplayMs >= DISPLAY_PERIOD_MS) {
     g_lastDisplayMs = millis();
-    char l1[40], l2[40];
-    formatTemp(l1, sizeof(l1), 0);
-    formatTemp(l2, sizeof(l2), 1);
-    if (g_sensors.count() == 0) {
-      fw::showLines("Передатчик LoraHome", "Нет датчиков 1-Wire!");
-    } else {
-      fw::showLines(l1, l2, "Ожидание запроса...");
-    }
+    drawStatus("Ожидание запроса...");
   }
 
   // --- serve incoming requests ----------------------------------------------

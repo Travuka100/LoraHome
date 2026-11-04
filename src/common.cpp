@@ -6,46 +6,86 @@ static volatile bool s_interruptFlag = false;
 
 static void IRAM_ATTR onDio1_isr() { s_interruptFlag = true; }
 
-// --- Display -----------------------------------------------------------------
+// --- Display ------------------------------------------------------------------
+// Layout of the 128x64 SSD1306 (U8g2 "F" = full-buffer, no flicker):
+//
+//   +------------------------------+
+//   | Title              [_|__] 85%|  <- header row, battery icon top-right
+//   |------------------------------|  <- thin separator line
+//   | body line 1                    |
+//   | body line 2                    |
+//   | body line 3                    |
+//   +------------------------------+
+//
+// Redraws are change-deduplicated to spare the OLED and the CPU.
+static char s_lastTitle[24] = "";
 static char s_lastL1[40] = "";
 static char s_lastL2[40] = "";
 static char s_lastL3[40] = "";
+static uint8_t s_lastBatt = 0xFF; // 0xFF = not drawn yet
 
-void showLines(const char *l1, const char *l2, const char *l3) {
+// Battery pictogram: 18x9 body + 2x3 cap, drawn at (x, y) top-left corner.
+static void drawBatteryIcon(uint8_t pct) {
+  const int x = 128 - 18 - 2; // right margin 2 px
+  const int y = 2;
+  display.drawFrame(x, y, 18, 9);           // body outline
+  display.drawBox(x + 18, y + 3, 2, 3); // positive terminal nub
+
+  const int innerW = 16; // drawable area inside the frame
+  const int filled = (innerW * static_cast<int>(pct)) / 100;
+  if (filled > 0) {
+    display.drawBox(x + 1, y + 1, filled, 7);
+  }
+}
+
+void uiDraw(const char *title, uint8_t battPct, const char *l1, const char *l2,
+            const char *l3) {
+  if (title == nullptr) title = s_lastTitle; // keep previous header
+  if (battPct == 0xFF) battPct = s_lastBatt; // keep previous battery value
   if (l1 == nullptr) l1 = "";
   if (l2 == nullptr) l2 = "";
   if (l3 == nullptr) l3 = "";
 
-  if (strcmp(l1, s_lastL1) == 0 && strcmp(l2, s_lastL2) == 0 &&
-      strcmp(l3, s_lastL3) == 0) {
-    return; // no change -> no redraw (saves OLED wear & power)
+  if (strcmp(title, s_lastTitle) == 0 && strcmp(l1, s_lastL1) == 0 &&
+      strcmp(l2, s_lastL2) == 0 && strcmp(l3, s_lastL3) == 0 &&
+      battPct == s_lastBatt) {
+    return; // nothing changed -> no SPI traffic, no flicker
   }
+  strlcpy(s_lastTitle, title, sizeof(s_lastTitle));
   strlcpy(s_lastL1, l1, sizeof(s_lastL1));
   strlcpy(s_lastL2, l2, sizeof(s_lastL2));
   strlcpy(s_lastL3, l3, sizeof(s_lastL3));
+  s_lastBatt = battPct;
 
-  display.clearDisplay();
-  display.firstPage();
-  do {
-    display.setFont(u8g2_font_6x13_t_cyrillic);
-    display.setCursor(0, 15);
-    display.print(s_lastL1);
-    if (s_lastL2[0]) {
-      display.setCursor(0, 32);
-      display.print(s_lastL2);
-    }
-    if (s_lastL3[0]) {
-      display.setCursor(0, 49);
-      display.print(s_lastL3);
-    }
-  } while (display.nextPage());
+  display.clearBuffer();
+
+  // Header: bold-ish title on the left, battery in the TOP-RIGHT corner.
+  display.setFont(u8g2_font_10x20_t_cyrillic);
+  display.setCursor(0, 12);
+  display.print(s_lastTitle);
+  drawBatteryIcon(s_lastBatt);
+  display.drawLine(0, 15, 127, 15); // separator
+
+  // Body lines: centered horizontally for a clean "menu" look.
+  display.setFont(u8g2_font_6x13_t_cyrillic);
+  const char *lines[3] = {s_lastL1, s_lastL2, s_lastL3};
+  const int8_t baselines[3] = {31, 46, 61};
+  for (uint8_t i = 0; i < 3; ++i) {
+    if (lines[i][0] == '\0') continue;
+    const int16_t w = display.getStrWidth(lines[i]);
+    int16_t x = (128 - w) / 2;
+    if (x < 0) x = 0;
+    display.setCursor(x, baselines[i]);
+    display.print(lines[i]);
+  }
+  display.sendBuffer();
 }
 
 void showError(const char *what, int code) {
   char buf[40];
   snprintf(buf, sizeof(buf), "%s err:%d", what, code);
-  s_lastL1[0] = '\0'; // force redraw
-  showLines("FATAL", buf, "проверьте железо");
+  s_lastTitle[0] = '\0'; // force redraw
+  uiDraw("ОШИБКА", 0xFF, buf, "проверьте", "подключение");
   Serial.println(buf);
 }
 

@@ -10,34 +10,38 @@
 // ============================================================================
 //  Common firmware services shared by SENDER and RECEIVER roles:
 //   - single SX1262 instance + DIO1 interrupt plumbing,
-//   - OLED text output with change-deduplication,
+//   - pretty OLED UI (header + battery icon in the top-right corner),
 //   - robust RX/TX helpers (timeout-bounded IRQ wait, full packet validation).
 // ============================================================================
 
 namespace fw {
 
 extern SX1262 radio;
-extern U8G2_SSD1306_128X64_NONAME_1_SW_I2C display;
+extern U8G2_SSD1306_128X64_NONAME_F_SW_I2C display;
 
 // Node addressing (both ends must agree)
 constexpr uint8_t RECEIVER_ID = 0x01; // handheld receiver (battery, button)
 constexpr uint8_t SENDER_ID = 0x02;   // transmitter with 2x DS18B20 (mains)
 
-// Timing constants (ms)
-constexpr uint32_t IRQ_WAIT_TX_MS = 5000;      // max wait for TX_DONE
-constexpr uint32_t RESPONSE_TIMEOUT_MS = 1500; // wait for response per attempt
-                                               // (SF9 airtime ~0.4 s/hop -> ample)
-constexpr uint8_t MAX_ATTEMPTS = 4;            // request retransmissions
-constexpr uint32_t RETRY_BACKOFF_MS = 120;     // pause between retries
-constexpr uint32_t DISPLAY_HOLD_MS = 5000;     // result screen hold
-constexpr uint32_t IDLE_SLEEP_MS = 60000;      // auto deep sleep (receiver)
+// Timing constants (ms). LoRa PHY is SF12/125kHz: one 16-byte frame is on
+// air ~1.1 s, so a full request->response round takes ~2.5 s. The per-attempt
+// response window covers sender sensor refresh (up to ~1 s) + its TX time.
+constexpr uint32_t IRQ_WAIT_TX_MS = 8000;       // max wait for TX_DONE
+constexpr uint32_t RESPONSE_TIMEOUT_MS = 6000;  // wait for response per attempt
+constexpr uint8_t MAX_ATTEMPTS = 3;             // request transmissions total
+constexpr uint32_t RETRY_BACKOFF_MS = 300;      // pause between retries
+constexpr uint32_t DISPLAY_HOLD_MS = 15000;     // result screen hold
+constexpr uint32_t IDLE_SLEEP_MS = 90000;       // auto deep sleep (receiver)
 constexpr uint16_t BTN_DEBOUNCE_MS = 30;
-constexpr uint16_t BTN_LONG_MS = 2000;         // long press -> power off
+constexpr uint16_t BTN_LONG_MS = 2000;          // long press -> power off
 
 // --- Display ------------------------------------------------------------------
-// Print up to 3 lines; redraws only when the content actually changed.
-void showLines(const char *l1, const char *l2 = nullptr,
-               const char *l3 = nullptr);
+// Pretty 128x64 UI (change-deduplicated, no flicker):
+// bold title on the left + battery pictogram in the TOP-RIGHT corner,
+// separator line, up to three centered body lines.
+// battPct == 0xFF keeps the previously drawn battery value.
+void uiDraw(const char *title, uint8_t battPct, const char *l1,
+            const char *l2, const char *l3);
 void showError(const char *what, int code); // fatal init error screen
 
 // Shared bring-up: serial, VEXT rail, OLED, radio + DIO1 IRQ, RX armed.
