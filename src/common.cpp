@@ -29,12 +29,12 @@ static void drawBatteryIcon(uint8_t pct) {
   const int x = 128 - 18 - 2; // right margin 2 px
   const int y = 2;
   display.drawFrame(x, y, 18, 9);           // body outline
-  display.drawFilledFrame(x + 18, y + 3, 2, 3); // positive terminal nub
+  display.drawBox(x + 18, y + 3, 2, 3); // positive terminal nub
 
   const int innerW = 16; // drawable area inside the frame
   const int filled = (innerW * static_cast<int>(pct)) / 100;
   if (filled > 0) {
-    display.drawFilledFrame(x + 1, y + 1, filled, 7);
+    display.drawBox(x + 1, y + 1, filled, 7);
   }
 }
 
@@ -60,23 +60,23 @@ void uiDraw(const char *title, uint8_t battPct, const char *l1, const char *l2,
   display.clearBuffer();
 
   // Header: bold-ish title on the left, battery in the TOP-RIGHT corner.
-  display.setFont(u8g2_font_helvB10_t_cyrillic);
+  display.setFont(u8g2_font_10x20_t_cyrillic);
   display.setCursor(0, 12);
   display.print(s_lastTitle);
   drawBatteryIcon(s_lastBatt);
   display.drawLine(0, 15, 127, 15); // separator
 
-  // Body lines.
+  // Body lines: centered horizontally for a clean "menu" look.
   display.setFont(u8g2_font_6x13_t_cyrillic);
-  display.setCursor(0, 30);
-  display.print(s_lastL1);
-  if (s_lastL2[0]) {
-    display.setCursor(0, 45);
-    display.print(s_lastL2);
-  }
-  if (s_lastL3[0]) {
-    display.setCursor(0, 60);
-    display.print(s_lastL3);
+  const char *lines[3] = {s_lastL1, s_lastL2, s_lastL3};
+  const int8_t baselines[3] = {31, 46, 61};
+  for (uint8_t i = 0; i < 3; ++i) {
+    if (lines[i][0] == '\0') continue;
+    const int16_t w = display.getStrWidth(lines[i]);
+    int16_t x = (128 - w) / 2;
+    if (x < 0) x = 0;
+    display.setCursor(x, baselines[i]);
+    display.print(lines[i]);
   }
   display.sendBuffer();
 }
