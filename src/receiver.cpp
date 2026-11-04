@@ -1,22 +1,19 @@
 // ============================================================================
 //  RECEIVER (приёмник) — Heltec WiFi LoRa 32 V3, питание от LiPo
 //
-//  UI:  главное меню — только заголовок + две строки; заряд батареи —
-//       пиктограмма в ПРАВОМ ВЕРХНЕМ углу экрана (всегда).
+//  Простой, предсказуемый алгоритм (без наложений и «тихих» состояний):
+//    короткое нажатие -> ОДИН запрос -> ждём ответ до RESPONSE_TIMEOUT_MS
+//      - ответ принят          -> экран телеметрии;
+//      - кнопки НЕ трогали     -> явно ОБЪЯВЛЯЕМ повтор: "Повтор 2/3";
+//      - нажали кнопку         -> ОТМЕНА (никаких повторов);
+//    долгое нажатие (>= 2 c)   -> выключение (глубокий сон).
 //
-//  Кнопка:
-//   - короткое нажатие          -> запрос телеметрии у передатчика;
-//   - нажатие ВО ВРЕМЯ запроса  -> ОТМЕНА (прекращаем ретрансляции);
-//   - долгое нажатие (>= 2 c)   -> выключение (глубокий сон);
-//   - пробуждение из сна        -> тоже долгое нажатие (защита от ложных).
+//  Передатчик отвечает ОДИН раз на каждый новый seq. Поэтому повтор всегда
+//  отправляется с НОВЫМ seq и только после полного окна ожидания — два
+//  ответа на один запрос физически невозможны, дубликаты не нужны.
 //
-//  Надёжность связи (простой алгоритм без лишних состояний):
-//   - до MAX_ATTEMPTS одинаковых запросов с разными seq;
-//   - каждый повтор ОБЪЯВЛЯЕТСЯ на экране ("Повтор 2/3");
-//   - ответ проверяется: CRC + адреса + эхо seq + флаги валидности датчиков;
-//   - дубликаты ответа отсекаются по (from_id, seq).
-//
-//  Передатчик работает от сети и кнопочных функций не имеет — они только тут.
+//  UI: главное меню — заголовок + две строки; заряд батареи — пиктограмма
+//  в правом верхнем углу экрана (всегда, кроме передатчика).
 // ============================================================================
 
 #include "common.h"
@@ -35,14 +32,13 @@ board::Button g_button(board::BUTTON_PIN, fw::BTN_DEBOUNCE_MS,
 
 uint8_t g_seq = 0; // rolling request sequence number
 
-// Last successfully received telemetry (kept for the result screen).
 bool g_haveData = false;
 lorahome::Packet g_data{};
 int16_t g_rssi = 0;
 uint32_t g_dataAgeStartMs = 0;
 
 uint32_t g_lastActivityMs = 0;
-uint32_t g_wakeGuardUntilMs = 0; // ignore short clicks right after wake
+uint32_t g_wakeGuardUntilMs = 0;
 uint32_t g_batteryTickMs = 0;
 uint16_t g_batteryMv = 0;
 
@@ -50,7 +46,6 @@ enum State : uint8_t { MENU, SHOW_RESULT };
 State g_state = MENU;
 uint32_t g_resultShownMs = 0;
 
-// --- helpers ------------------------------------------------------------------
 bool wokeFromSleep() {
   return esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT0;
 }
@@ -63,7 +58,7 @@ void drawMenu() {
   if (g_haveData) {
     const uint32_t ageS = (millis() - g_dataAgeStartMs) / 1000;
     char l2[40];
-    snprintf(l2, sizeof(l2), "Обновлено %lus назад",
+    snprintf(l2, sizeof(l2), "Данные %lus назад",
              static_cast<unsigned long>(ageS));
     fw::uiDraw("LoraHome", battPct(), "Кратко: запрос данных", l2, nullptr);
   } else {
@@ -74,78 +69,74 @@ void drawMenu() {
 
 void drawResult() {
   char l1[40], l2[40], l3[40];
-  snprintf(l1, sizeof(l1), "T1: %5.1f C",
-           static_cast<double>(g_data.temp1 / 100.0f));
-  snprintf(l2, sizeof(l2), "T2: %5.1f C",
-           static_cast<double>(g_data.temp2 / 100.0f));
+  // Display exactly what arrived; invalid channel shows "--.-".
+  if (g_data.flags & lorahome::FLAG_TEMP1_VALID)
+    snprintf(l1, sizeof(l1), "T1: %5.1f C",
+             static_cast<double>(g_data.temp1 / 100.0f));
+  else
+    strlcpy(l1, "T1: --.- C", sizeof(l1));
+  if (g_data.flags & lorahome::FLAG_TEMP2_VALID)
+    snprintf(l2, sizeof(l2), "T2: %5.1f C",
+             static_cast<double>(g_data.temp2 / 100.0f));
+  else
+    strlcpy(l2, "T2: --.- C", sizeof(l2));
   snprintf(l3, sizeof(l3), "RSSI %d dBm", g_rssi);
   fw::uiDraw("Телеметрия", battPct(), l1, l2, l3);
 }
 
 void updateUi() {
-  if (g_state == SHOW_RESULT && g_haveData) {
-    drawResult();
-  } else {
-    drawMenu();
-  }
+  if (g_state == SHOW_RESULT && g_haveData) drawResult();
+  else drawMenu();
 }
 
-// One request/response session with retransmissions.
-// Pressing the button during the session CANCELS it (returns false without
-// marking data stale). Returns true on a valid response captured into g_data.
-bool doTelemetryRequest() {
-  // Fresh battery reading at the start of every user action.
+// One full user session: send ONE request, wait for its answer.
+// Retries are announced on screen and only happen after the previous
+// response window FULLY expired (so a late first answer can never overlap
+// with the second request). Button press during the session cancels it.
+void doTelemetryRequest() {
   g_batteryMv = board::batteryMillivolts();
   g_batteryTickMs = millis();
 
-  for (uint8_t attempt = 1; attempt <= fw::MAX_ATTEMPTS; ++attempt) {
-    // Fresh seq per attempt: the sender suppresses duplicates by seq, so a
-    // repeated frame with the SAME seq would be silently ignored there.
+  bool got = false;
+  bool cancelled = false;
+
+  for (uint8_t attempt = 1; attempt <= fw::MAX_ATTEMPTS && !got && !cancelled;
+       ++attempt) {
+    // Announce EVERY transmission attempt, including retries.
+    char l1[40];
+    if (attempt == 1) strlcpy(l1, "Запрос 1 из 3...", sizeof(l1));
+    else snprintf(l1, sizeof(l1), "Повтор %d из 3...", attempt);
+    fw::uiDraw("LoraHome", battPct(), l1, "Кнопка - отмена", nullptr);
+
+    // Fresh seq per attempt: one sender answer per unique seq.
     lorahome::Packet req;
     lorahome::initPacket(req, fw::RECEIVER_ID, fw::SENDER_ID,
                          lorahome::TYPE_REQUEST, g_seq);
     lorahome::finalize(req);
 
-    // Announce every retransmission on screen — the user must SEE that the
-    // device is retrying, not silently waiting.
-    char l1[40], l2[40];
-    if (attempt == 1) {
-      strlcpy(l1, "Запрос телеметрии...", sizeof(l1));
-    } else {
-      snprintf(l1, sizeof(l1), "Повтор %d/%d", attempt,
-               static_cast<int>(fw::MAX_ATTEMPTS));
-    }
-    strlcpy(l2, "Кнопка - отмена", sizeof(l2));
-    fw::uiDraw("LoraHome", battPct(), l1, l2, nullptr);
-
     if (fw::transmitAndWait(req) != RADIOLIB_ERR_NONE) {
       Serial.print("TX failed, attempt ");
       Serial.println(attempt);
-      continue; // radio re-armed inside transmitAndWait
+      delay(fw::RETRY_BACKOFF_MS);
+      continue;
     }
 
-    // Bounded wait for the response, pumping the RX filter and the button.
+    // Single bounded wait loop: pump RX, watch the button, check deadline.
     const uint32_t deadline = millis() + fw::RESPONSE_TIMEOUT_MS;
     while (millis() < deadline) {
       if (fw::pollReceive(fw::SENDER_ID, lorahome::TYPE_RESPONSE, 150)) {
         lorahome::Packet resp;
         int16_t rssi = 0;
         if (fw::takeReceived(resp, &rssi) == RADIOLIB_ERR_NONE &&
-            resp.seq == req.seq && // application ACK: response echoes our seq
-            (resp.flags & (lorahome::FLAG_TEMP1_VALID |
-                           lorahome::FLAG_TEMP2_VALID))) {
+            resp.seq == g_seq) {
           g_data = resp;
           g_rssi = rssi;
-          ++g_seq;
-          g_haveData = true;
-          g_dataAgeStartMs = millis();
-          return true;
+          got = true;
+          break;
         }
-        // Stale answer or "no valid sensors" reply -> ignore, keep waiting.
+        // Foreign/stale frame -> keep waiting inside the same window.
       }
 
-      // Button handling inside the wait loop: LONG still means power off,
-      // any press cancels the session.
       g_button.tick();
       switch (g_button.event()) {
       case board::ButtonEvent::LONG:
@@ -153,24 +144,40 @@ bool doTelemetryRequest() {
                    nullptr);
         delay(300);
         board::deepSleepWithRadioOff(fw::radio); // never returns
-        break;
       case board::ButtonEvent::SHORT:
-        if (millis() < g_wakeGuardUntilMs) break; // swallow post-wake click
-        Serial.println("Request cancelled by user.");
-        fw::uiDraw("LoraHome", battPct(), "Отменено", nullptr, nullptr);
-        delay(600);
-        ++g_seq; // burn seq so a late answer can't match anything later
-        return false;
+        if (millis() < g_wakeGuardUntilMs) break;
+        cancelled = true;
+        break;
       case board::ButtonEvent::NONE:
       default:
         break;
       }
+      if (cancelled) break;
     }
-    Serial.print("No valid response, attempt ");
-    Serial.println(attempt);
+
+    if (cancelled) {
+      fw::uiDraw("LoraHome", battPct(), "Отменено", nullptr, nullptr);
+      delay(700);
+    }
+    // This seq is spent (answered or timed out) — burn it either way so a
+    // hypothetical late duplicate of an old answer can never match later.
+    ++g_seq;
+    if (!got && !cancelled) delay(fw::RETRY_BACKOFF_MS);
   }
-  ++g_seq; // burn the seq anyway so stale responses can't match later
-  return false;
+
+  markActivity();
+  if (got) {
+    g_haveData = true;
+    g_dataAgeStartMs = millis();
+    g_state = SHOW_RESULT;
+    g_resultShownMs = millis();
+    updateUi();
+  } else if (!cancelled) {
+    fw::uiDraw("LoraHome", battPct(), "Нет ответа", "передатчик молчит",
+               nullptr);
+    delay(1800);
+    updateUi();
+  }
 }
 
 } // namespace
@@ -180,15 +187,13 @@ void setup() {
     return; // error screen already shown by commonInit
   }
 
-  // Battery reading BEFORE anything else so the first frame shows real data.
   g_batteryMv = board::batteryMillivolts();
   g_batteryTickMs = millis();
 
   markActivity();
   if (wokeFromSleep()) {
     // Woken by a falling edge that may still be held: require the user to
-    // keep holding >= BTN_LONG_MS; swallow any shorter click (prevents
-    // accidental requests / instant re-sleep in a pocket).
+    // keep holding >= BTN_LONG_MS; swallow any shorter click.
     g_wakeGuardUntilMs = millis() + fw::BTN_LONG_MS + 500;
     fw::uiDraw("LoraHome", battPct(), "Пробуждение...",
                "удерживайте кнопку", nullptr);
@@ -200,7 +205,6 @@ void setup() {
 void loop() {
   g_button.tick();
 
-  // --- periodic battery refresh (every 10 s) ---------------------------------
   if (millis() - g_batteryTickMs >= 10000) {
     g_batteryTickMs = millis();
     g_batteryMv = board::batteryMillivolts();
@@ -210,26 +214,15 @@ void loop() {
 
   switch (g_button.event()) {
   case board::ButtonEvent::LONG:
-    // Power off: deep sleep until the next press-and-hold.
     fw::uiDraw("LoraHome", battPct(), "Выключение...", "глубокий сон",
                nullptr);
-    delay(300); // let the frame flush before cutting the rail
+    delay(300);
     board::deepSleepWithRadioOff(fw::radio); // never returns
     break;
 
   case board::ButtonEvent::SHORT:
-    if (inWakeGuard) break; // accidental click right after wake -> ignore
-    markActivity();
-    if (doTelemetryRequest()) {
-      g_state = SHOW_RESULT;
-      g_resultShownMs = millis();
-      updateUi();
-    } else {
-      fw::uiDraw("LoraHome", battPct(), "Передатчик не отвечает",
-                 "повторите позже", nullptr);
-      delay(1500);
-      updateUi();
-    }
+    if (inWakeGuard) break;
+    doTelemetryRequest();
     break;
 
   case board::ButtonEvent::NONE:
@@ -237,7 +230,6 @@ void loop() {
     break;
   }
 
-  // Result screen auto-falls-back to the menu after DISPLAY_HOLD_MS.
   if (g_state == SHOW_RESULT &&
       millis() - g_resultShownMs >= fw::DISPLAY_HOLD_MS) {
     g_state = MENU;
@@ -245,7 +237,6 @@ void loop() {
 
   updateUi();
 
-  // --- automatic power save ---------------------------------------------------
   if (g_state == MENU && !g_button.pressed() &&
       millis() - g_lastActivityMs >= fw::IDLE_SLEEP_MS) {
     fw::uiDraw("LoraHome", battPct(), "Авто-сон...", nullptr, nullptr);
@@ -253,5 +244,5 @@ void loop() {
     board::deepSleepWithRadioOff(fw::radio); // never returns
   }
 
-  delay(20); // ~50 Hz UI/button loop; radio IRQs are handled via flag polls
+  delay(20);
 }

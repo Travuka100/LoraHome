@@ -27,12 +27,10 @@ Sensors g_sensors(board::ONEWIRE_PIN);
 
 uint32_t g_lastRefreshMs = 0;
 uint32_t g_lastDisplayMs = 0;
-uint8_t g_lastReqSeq = 0xFF; // duplicate-suppression window state
-uint32_t g_lastReqMs = 0;
+uint8_t g_lastSeqSeen = 0xFF; // last answered request seq (duplicate guard)
 
 constexpr uint32_t SENSOR_PERIOD_MS = 2000;  // 12-bit conversion ~750 ms
 constexpr uint32_t DISPLAY_PERIOD_MS = 1000; // UI refresh rate
-constexpr uint32_t DUP_WINDOW_MS = 4000;     // ignore repeated req w/ same seq
 
 void formatTemp(char *buf, size_t n, int idx) {
   if (g_sensors.valid(idx)) {
@@ -43,30 +41,30 @@ void formatTemp(char *buf, size_t n, int idx) {
   }
 }
 
+// battPct == kNoBattery (0xFE): the sender is mains powered — no battery UI.
 void drawStatus(const char *note) {
   char l1[40], l2[40];
   if (g_sensors.count() == 0) {
-    fw::uiDraw("Передатчик", 0xFF, "Нет датчиков 1-Wire!",
+    fw::uiDraw("Передатчик", 0xFE, "Нет датчиков 1-Wire!",
                "проверьте GPIO4/подтяжку", nullptr);
     return;
   }
   formatTemp(l1, sizeof(l1), 0);
   formatTemp(l2, sizeof(l2), 1);
-  fw::uiDraw("Передатчик", 0xFF, l1, l2, note);
+  fw::uiDraw("Передатчик", 0xFE, l1, l2, note);
 }
 
 void handleRequest(const lorahome::Packet &req) {
-  // Duplicate suppression: the receiver always increments seq on retries,
-  // so two requests with the SAME seq within DUP_WINDOW_MS are multiple
-  // receptions of one and the same frame -> answer only once (avoid double TX).
-  const bool duplicate =
-      (req.seq == g_lastReqSeq) && (millis() - g_lastReqMs < DUP_WINDOW_MS);
-  g_lastReqSeq = req.seq;
-  g_lastReqMs = millis();
-  if (duplicate) {
-    Serial.println("Duplicate request ignored.");
+  // The receiver increments seq on EVERY retry and only retries after its
+  // response window fully expired, so a repeated SAME-seq frame here can
+  // only be a multi-reception echo of one request (long cable/reflections).
+  // Answer each NEW seq exactly once; ignore same-seq echoes to avoid TX
+  // collisions with the answer we just sent.
+  if (req.seq == g_lastSeqSeen) {
+    Serial.println("Same-seq echo ignored.");
     return;
   }
+  g_lastSeqSeen = req.seq;
 
   lorahome::Packet resp;
   lorahome::initPacket(resp, fw::SENDER_ID, fw::RECEIVER_ID,
@@ -89,8 +87,13 @@ void handleRequest(const lorahome::Packet &req) {
 
   const int st = fw::transmitAndWait(resp);
   if (st == RADIOLIB_ERR_NONE) {
-    Serial.println("Response sent.");
-    drawStatus("Запрос принят, ответ отправлен");
+    Serial.print("Answered seq ");
+    Serial.print(req.seq);
+    Serial.print(" T1=");
+    Serial.print(resp.temp1);
+    Serial.print(" T2=");
+    Serial.println(resp.temp2);
+    drawStatus("Ответ отправлен");
     g_lastDisplayMs = millis();
   } else {
     Serial.print("Response TX failed: ");
@@ -112,7 +115,7 @@ void setup() {
   char buf[40];
   snprintf(buf, sizeof(buf), "Датчиков найдено: %d", found);
   Serial.println(buf);
-  fw::uiDraw("Передатчик", 0xFF, buf, nullptr, nullptr);
+  fw::uiDraw("Передатчик", 0xFE, buf, nullptr, nullptr);
 
   g_sensors.refresh(); // first synchronous reading
   g_lastRefreshMs = millis();
