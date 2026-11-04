@@ -74,6 +74,7 @@ void updateUi() {
     } else {
       strlcpy(l2, "D2: --.- C (нет)", sizeof(l2));
     }
+    // Battery first — it is the user-visible health indicator of THIS device.
     snprintf(l3, sizeof(l3), "Бат:%d%% Rssi:%d %lus", pct, g_rssi,
              static_cast<unsigned long>(ageS));
     fw::showLines(l1, l2, l3);
@@ -88,18 +89,22 @@ void updateUi() {
     fw::showLines(l1, l2, l3);
   }
 }
-
 // One full request/response round with retransmissions.
 // Returns true if a valid response was captured into g_data.
 bool doTelemetryRequest() {
   fw::showLines("Запрос телеметрии...", "жду ответа", nullptr);
 
+  // Refresh the battery reading at the start of every user action so the
+  // result screen always shows a fresh value (not one from up to 10 s ago).
+  g_batteryMv = board::batteryMillivolts();
+  g_batteryTickMs = millis();
+
   for (uint8_t attempt = 1; attempt <= fw::MAX_ATTEMPTS; ++attempt) {
-    // Retries keep the most robust PHY (SF12/4/5 = max link budget) but use
-    // a fresh sequence number and a randomized backoff, so a repeated frame
-    // lost to noise or collision still gets an independent chance.
+    // Retries use a fresh sequence number and a short randomized backoff.
+    // With SF9 airtime (~0.4 s per hop) the whole 4-attempt session stays
+    // under ~7 s even in the worst case.
     if (attempt > 1) {
-      delay(fw::RETRY_BACKOFF_MS * attempt + (micros() & 0x7F));
+      delay(fw::RETRY_BACKOFF_MS * attempt + (micros() & 0x3F));
     }
 
     lorahome::Packet req;
@@ -117,7 +122,7 @@ bool doTelemetryRequest() {
     const uint32_t deadline = millis() + fw::RESPONSE_TIMEOUT_MS;
     bool got = false;
     while (millis() < deadline) {
-      if (fw::pollReceive(fw::SENDER_ID, lorahome::TYPE_RESPONSE, 250)) {
+      if (fw::pollReceive(fw::SENDER_ID, lorahome::TYPE_RESPONSE, 150)) {
         lorahome::Packet resp;
         int16_t rssi = 0;
         if (fw::takeReceived(resp, &rssi) == RADIOLIB_ERR_NONE) {

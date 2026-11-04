@@ -86,6 +86,25 @@ int waitForIrq(uint32_t timeoutMs) {
   return static_cast<int>(radio.getIrqStatus());
 }
 
+// Check for an already-latched IRQ WITHOUT waiting. This closes the race where
+// a packet arrives while the firmware is busy with SPI transactions (e.g.
+// re-arming RX after the previous frame): DIO1 pulsed, we were not listening,
+// but the IRQ status register still holds RX_DONE. Without this check such
+// packets were silently dropped -> "transmitter never answers".
+static int pollIrqNow() {
+  // Read the latched SX1262 status register directly: it reports RX_DONE even
+  // if the DIO1 edge fired while we were busy with SPI transactions.
+  const int irq = static_cast<int>(radio.getIrqStatus());
+  if (irq == 0) {
+    // Radio idle -> consume any stale ISR flag so the subsequent bounded wait
+    // isn't woken immediately by an old edge.
+    noInterrupts();
+    s_interruptFlag = false;
+    interrupts();
+  }
+  return irq;
+}
+
 int transmitAndWait(const lorahome::Packet &pIn) {
   // RadioLib's API takes a non-const buffer; copy locally (16 bytes).
   lorahome::Packet p = pIn;
@@ -96,9 +115,9 @@ int transmitAndWait(const lorahome::Packet &pIn) {
   const int irq = waitForIrq(IRQ_WAIT_TX_MS);
   radio.startReceive(); // always re-arm the receiver afterwards
 
-  if (irq < 0) return RADIOLIB_ERR_TX_TIMEOUT;      // TX never completed
+  if (irq < 0) return RADIOLIB_ERR_TX_TIMEOUT; // TX never completed
   if (irq & RADIOLIB_SX126X_IRQ_TX_DONE) return RADIOLIB_ERR_NONE;
-  return RADIOLIB_ERR_UNKNOWN;                        // unexpected IRQ
+  return RADIOLIB_ERR_UNKNOWN;                  // unexpected IRQ
 }
 
 // Internal single-slot mailbox filled by pollReceive().
@@ -107,11 +126,18 @@ static lorahome::Packet s_frame;
 static int16_t s_frameRssi = 0;
 
 bool pollReceive(uint8_t expectFrom, uint8_t expectType, uint32_t sliceMs) {
-  const int irq = waitForIrq(sliceMs);
+  // Fast path: an RX_DONE may have latched in the radio status register while
+  // we were busy elsewhere (OLED refresh, SPI re-arm window). Consume it
+  // immediately instead of waiting for a new DIO1 edge.
+  int irq = pollIrqNow();
+  if (!(irq & RADIOLIB_SX126X_IRQ_RX_DONE)) {
+    // Nothing pending -> wait up to sliceMs for a fresh IRQ edge.
+    irq = waitForIrq(sliceMs);
+  }
   if (irq < 0) return false; // nothing arrived in this slice
 
   if (!(irq & RADIOLIB_SX126X_IRQ_RX_DONE)) {
-    radio.startReceive(); // spurious IRQ -> keep listening
+    radio.startReceive(); // spurious/timeout IRQ -> keep listening
     return false;
   }
 
