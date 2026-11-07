@@ -50,7 +50,9 @@ constexpr uint8_t kNoBattery = 0xFE; // sender: don't draw the icon at all
 
 // UTF-8-correct string width (same decoder path as drawUTF8).
 static int16_t strWidthUtf8(const char *s) {
-  return static_cast<int16_t>(u8g2_GetUTF8Width(&display.getU8g2()->u8g2, s));
+  // C++ wrapper method: internally u8g2_GetUTF8Width(&u8g2, s) — exact same
+  // advance that drawUTF8() uses for positioning -> centering stays exact.
+  return static_cast<int16_t>(fw::display.getUTF8Width(s));
 }
 
 // Battery pictogram: 16x8 body + 2x3 cap, snug in the TOP-RIGHT corner.

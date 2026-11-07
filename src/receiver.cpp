@@ -35,7 +35,6 @@ uint8_t g_seq = 0; // rolling request sequence number
 bool g_haveData = false;
 lorahome::Packet g_data{};
 int16_t g_rssi = 0;
-uint32_t g_dataAgeStartMs = 0;
 
 uint32_t g_lastActivityMs = 0;
 uint32_t g_wakeGuardUntilMs = 0;
@@ -55,16 +54,8 @@ void markActivity() { g_lastActivityMs = millis(); }
 uint8_t battPct() { return board::batteryPercent(g_batteryMv); }
 
 void drawMenu() {
-  if (g_haveData) {
-    const uint32_t ageS = (millis() - g_dataAgeStartMs) / 1000;
-    char l2[40];
-    snprintf(l2, sizeof(l2), "Данные %lus назад",
-             static_cast<unsigned long>(ageS));
-    fw::uiDraw("LoraHome", battPct(), "Кратко: запрос данных", l2, nullptr);
-  } else {
-    fw::uiDraw("LoraHome", battPct(), "Кратко: запрос данных",
-               "Долго: выключение", nullptr);
-  }
+  fw::uiDraw("LoraHome", battPct(), "Кратко: запрос данных",
+             "Долго: выключение", nullptr);
 }
 
 void drawResult() {
@@ -169,7 +160,6 @@ void doTelemetryRequest() {
   markActivity();
   if (got) {
     g_haveData = true;
-    g_dataAgeStartMs = millis();
     g_state = SHOW_RESULT;
     g_resultShownMs = millis();
     updateUi();
