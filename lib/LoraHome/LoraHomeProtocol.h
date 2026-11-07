@@ -4,6 +4,9 @@
 #include <Arduino.h>
 #include <string.h>
 
+#include <cstddef> // offsetof (needed by parse(); was the cause of a hard
+                   // compile error in the native test build)
+
 // ============================================================================
 //  LoraHome telemetry protocol (SX1262 / RadioLib)
 //
@@ -80,8 +83,8 @@ inline void initPacket(Packet &p, uint8_t fromId, uint8_t toId,
   p.to_id = toId;
   p.type = static_cast<uint8_t>(type);
   p.seq = seq;
-  p.temp1 = static_cast<int16_t>(TEMP_INVALID);
-  p.temp2 = static_cast<int16_t>(TEMP_INVALID);
+  p.temp1 = TEMP_INVALID;
+  p.temp2 = TEMP_INVALID;
 }
 
 // CRC-16/XMODES (poly 0x1021, init 0x0000).
@@ -116,12 +119,46 @@ inline bool parse(const uint8_t *buf, size_t len, Packet &out) {
 }
 
 // Encode temperature (deg C) into the wire field. NaN/out-of-range -> invalid.
+// CRITICAL: the range check MUST be done on the INTEGER centi-degrees value.
+// The previous version compared `scaled` (x100!) against bounds written for
+// degrees (-327.67f..327.66f), so EVERY real reading (e.g. 21.34 C -> scaled
+// 2134 > 327.66) was rejected as "out of range" and encoded as TEMP_INVALID.
+// That is why the receiver showed "--.-" even though the radio reported TX OK:
+// the packet itself was perfectly valid, it just carried an invalid sentinel.
 inline int16_t encodeTempC(float t) {
-  if (!(t == t)) return static_cast<int16_t>(TEMP_INVALID); // NaN guard
-  const float scaled = t * 100.0f;
-  if (scaled < -327.67f || scaled > 327.66f)
-    return static_cast<int16_t>(TEMP_INVALID);
-  return static_cast<int16_t>(lroundf(scaled));
+  if (!(t == t)) return TEMP_INVALID; // NaN guard
+  const long scaled = lroundf(t * 100.0f);
+  if (scaled < INT16_MIN || scaled > INT16_MAX - 1) // -1 reserved for sentinel
+    return TEMP_INVALID;
+  return static_cast<int16_t>(scaled);
+}
+
+// True if a wire value is a real reading (not the sentinel). NOTE: -327.68 C
+// is physically impossible for DS18B20 (spec range -55..+125 C), so the
+// sentinel collision is harmless in practice.
+inline bool isTempValid(int16_t raw) { return raw != TEMP_INVALID; }
+
+// Decode the wire field back to deg C (only call when isTempValid()).
+inline float decodeTempC(int16_t raw) { return static_cast<float>(raw) / 100.0f; }
+
+// Build a RESPONSE frame from up to MAX_SENSORS readings. This is the ONE
+// canonical place where validity flags are set — previously the sender did it
+// inline with a broken sentinel comparison and the flags never got raised,
+// which made every receiver screen show "--.-" although TX reported success.
+// `temps` are deg C; pass NAN (or use tempValid[] = false) for dead channels.
+inline void buildResponse(Packet &p, uint8_t fromId, uint8_t toId,
+                          uint8_t seq, const float temps[MAX_SENSORS],
+                          const uint16_t batteryMv = 0) {
+  initPacket(p, fromId, toId, TYPE_RESPONSE, seq);
+  for (uint8_t i = 0; i < MAX_SENSORS; ++i) {
+    const int16_t enc = encodeTempC(temps[i]);
+    if (i == 0) p.temp1 = enc; else p.temp2 = enc;
+    if (isTempValid(enc)) {
+      p.flags |= (i == 0) ? FLAG_TEMP1_VALID : FLAG_TEMP2_VALID;
+    }
+  }
+  p.battery_mv = batteryMv;
+  finalize(p);
 }
 
 } // namespace lorahome
