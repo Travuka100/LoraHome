@@ -69,15 +69,16 @@ void drawMenu() {
 
 void drawResult() {
   char l1[40], l2[40], l3[40];
-  // Display exactly what arrived; invalid channel shows "--.-".
+  // Trust the validity FLAGS (single source of truth set by the sender's
+  // buildResponse), not raw sentinel values: flag -> number, no flag -> "--.-".
   if (g_data.flags & lorahome::FLAG_TEMP1_VALID)
     snprintf(l1, sizeof(l1), "T1: %5.1f C",
-             static_cast<double>(g_data.temp1 / 100.0f));
+             static_cast<double>(lorahome::decodeTempC(g_data.temp1)));
   else
     strlcpy(l1, "T1: --.- C", sizeof(l1));
   if (g_data.flags & lorahome::FLAG_TEMP2_VALID)
     snprintf(l2, sizeof(l2), "T2: %5.1f C",
-             static_cast<double>(g_data.temp2 / 100.0f));
+             static_cast<double>(lorahome::decodeTempC(g_data.temp2)));
   else
     strlcpy(l2, "T2: --.- C", sizeof(l2));
   snprintf(l3, sizeof(l3), "RSSI %d dBm", g_rssi);

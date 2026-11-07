@@ -66,24 +66,17 @@ void handleRequest(const lorahome::Packet &req) {
   }
   g_lastSeqSeen = req.seq;
 
-  lorahome::Packet resp;
-  lorahome::initPacket(resp, fw::SENDER_ID, fw::RECEIVER_ID,
-                       lorahome::TYPE_RESPONSE, req.seq); // echo seq = ACK
-
+  // Canonical response builder: encodes both channels and sets the validity
+  // flags in ONE place (LoraHomeProtocol.h). Dead/absent channels become
+  // TEMP_INVALID with no flag, so the receiver shows "--.-" for them ONLY.
+  float temps[lorahome::MAX_SENSORS] = {NAN, NAN};
   for (uint8_t i = 0; i < lorahome::MAX_SENSORS; ++i) {
-    int16_t t = static_cast<int16_t>(lorahome::TEMP_INVALID);
-    if (g_sensors.valid(i)) {
-      t = lorahome::encodeTempC(g_sensors.temperatureC(i));
-      if (t != static_cast<int16_t>(lorahome::TEMP_INVALID)) {
-        resp.flags |= (i == 0) ? lorahome::FLAG_TEMP1_VALID
-                               : lorahome::FLAG_TEMP2_VALID;
-      }
-    }
-    if (i == 0) resp.temp1 = t; else resp.temp2 = t;
+    if (g_sensors.valid(i)) temps[i] = g_sensors.temperatureC(i);
   }
-  // The receiver displays its OWN battery on screen; the sender is mains
-  // powered and has no battery to report (stays 0 by design).
-  lorahome::finalize(resp);
+
+  lorahome::Packet resp;
+  lorahome::buildResponse(resp, fw::SENDER_ID, fw::RECEIVER_ID,
+                          req.seq, temps); // echo seq = ACK
 
   const int st = fw::transmitAndWait(resp);
   if (st == RADIOLIB_ERR_NONE) {
@@ -92,7 +85,9 @@ void handleRequest(const lorahome::Packet &req) {
     Serial.print(" T1=");
     Serial.print(resp.temp1);
     Serial.print(" T2=");
-    Serial.println(resp.temp2);
+    Serial.print(resp.temp2);
+    Serial.print(" flags=0x");
+    Serial.println(resp.flags, HEX); // must be 0x03 with two live sensors
     drawStatus("Ответ отправлен");
     g_lastDisplayMs = millis();
   } else {
